@@ -2,6 +2,7 @@
 import torch
 import cv2
 import numpy as np
+import math
 from tqdm import tqdm
 from .pipeline import BallPoint  # 导入数据包定义
 
@@ -17,12 +18,6 @@ MODEL_CONFIGS = {
         neck=dict(type='TrackNetV2Neck'),
         head=dict(type='TrackNetV2Head', in_channels=64, out_channels=3)
     ),
-    'v4': dict(
-        type='TrackNetV4',
-        backbone=dict(type='TrackNetV4Backbone', in_channels=9),
-        neck=dict(type='TrackNetV2Neck'),
-        head=dict(type='TrackNetV4Head', in_channels=64, out_channels=3)
-    ),
     'v5': dict(
         type='TrackNetV5',
         backbone=dict(type='TrackNetV2Backbone', in_channels=13),
@@ -35,13 +30,15 @@ class TrackNetDetector:
     def __init__(self, arch, weights_path, device='cuda:0', threshold=0.5):
         """
         Stage 1: 检测器
-        :param arch: 架构版本 ('v2', 'v4', 'v5')
+        :param arch: 架构版本 ('v2', 'v5')
         :param weights_path: .pth 权重文件路径
         :param device: 设备 (如 'cuda:0' 或 'cpu')
         :param threshold: 热力图激活阈值
         """
+        self.threshold = float(threshold)
+        if not math.isfinite(self.threshold) or not 0 <= self.threshold < 1:
+            raise ValueError(f"threshold must be a finite value in [0, 1), got {threshold}")
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        self.threshold = threshold
         self.input_size = (288, 512)
 
         # 1. 从内部配置库获取配置
@@ -62,53 +59,64 @@ class TrackNetDetector:
     def detect_video(self, video_path: str) -> list:
         """执行全视频扫描并返回原始 BallPoint 列表"""
         cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Unable to open video: {video_path}")
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        # 初始化全视频长度的包裹列表
-        raw_points = [BallPoint() for _ in range(total_frames)]
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if width <= 0 or height <= 0 or width * 9 != height * 16:
+            cap.release()
+            raise ValueError(f"TrackNet requires 16:9 video, got {width}x{height}: {video_path}")
 
-        pbar = tqdm(total=total_frames, desc="[Stage 1] Neural Inference")
-        frame_idx = 0
+        raw_points = []
 
-        while cap.isOpened():
-            # --- Jump-3 读取逻辑 ---
-            ret1, f1 = cap.read()
-            ret2, f2 = cap.read()
-            ret3, f3 = cap.read()
+        pbar = tqdm(total=total_frames or None, desc="[Stage 1] Neural Inference")
 
-            if not all([ret1, ret2, ret3]):
-                break
+        try:
+            while cap.isOpened():
+                frames = []
+                for _ in range(3):
+                    readable, frame = cap.read()
+                    if not readable:
+                        break
+                    frames.append(frame)
+                if not frames:
+                    break
+                actual_frame_count = len(frames)
+                while len(frames) < 3:
+                    frames.append(frames[-1])
 
-            # --- 预处理 ---
-            # 准备 3 帧输入
-            batch_data = {
-                'p': cv2.cvtColor(f1, cv2.COLOR_BGR2RGB),
-                'c': cv2.cvtColor(f2, cv2.COLOR_BGR2RGB),
-                'n': cv2.cvtColor(f3, cv2.COLOR_BGR2RGB)
-            }
-            batch_data = self.resizer(batch_data)
-            batch_data = self.concator(batch_data)
-            
-            # 转为 Tensor [1, C, H, W]
-            img_tensor = torch.from_numpy(batch_data['img'].transpose(2, 0, 1))
-            img_tensor = img_tensor.float().div(255).unsqueeze(0).to(self.device)
+                batch_data = {
+                    'p': cv2.cvtColor(frames[0], cv2.COLOR_BGR2RGB),
+                    'c': cv2.cvtColor(frames[1], cv2.COLOR_BGR2RGB),
+                    'n': cv2.cvtColor(frames[2], cv2.COLOR_BGR2RGB)
+                }
+                batch_data = self.concator(self.resizer(batch_data))
+                img_tensor = torch.from_numpy(batch_data['img'].transpose(2, 0, 1))
+                img_tensor = img_tensor.float().div(255).unsqueeze(0).to(self.device)
 
-            # --- 推理 ---
-            with torch.no_grad():
-                # 输出形状为 [1, 3, H, W]
-                heatmap_preds = self.model(img_tensor).squeeze(0).cpu().numpy()
+                with torch.no_grad():
+                    heatmap_preds = self.model(img_tensor).squeeze(0).cpu().numpy()
+                if heatmap_preds.shape != (3, *self.input_size):
+                    raise ValueError(
+                        f"Unexpected model output shape: {heatmap_preds.shape}, "
+                        f"expected {(3, *self.input_size)}"
+                    )
 
-            # --- 解析并装包 ---
-            for i in range(3):
-                curr_idx = frame_idx + i
-                if curr_idx < total_frames:
-                    # 将热力图解析为 BallPoint 对象（包含 x, y, conf）
-                    raw_points[curr_idx] = self._heatmap_to_point(heatmap_preds[i])
+                for heatmap in heatmap_preds[:actual_frame_count]:
+                    point = self._heatmap_to_point(heatmap)
+                    if point.is_detected:
+                        point.x *= width / self.input_size[1]
+                        point.y *= height / self.input_size[0]
+                    raw_points.append(point)
 
-            frame_idx += 3
-            pbar.update(3)
+                pbar.update(actual_frame_count)
+                if actual_frame_count < 3:
+                    break
+        finally:
+            pbar.close()
+            cap.release()
 
-        cap.release()
         return raw_points
 
     def _heatmap_to_point(self, heatmap: np.ndarray) -> BallPoint:

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import cv2
+import math
 from tqdm import tqdm
 from pathlib import Path
 from dataclasses import dataclass
@@ -69,32 +70,42 @@ class TennisPipeline:
         print("\n[Stage 3/3] Rendering Final Video...")
         
         cap = cv2.VideoCapture(str(video_path))
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        if not cap.isOpened():
+            raise ValueError(f"Unable to open video: {video_path}")
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not math.isfinite(fps) or fps <= 0 or width <= 0 or height <= 0:
+            cap.release()
+            raise ValueError(f"Invalid video metadata: {video_path}")
         
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        
-        pbar = tqdm(total=total_frames, desc="Rendering")
-        
+        if not out.isOpened():
+            cap.release()
+            out.release()
+            raise ValueError(f"Unable to open video writer: {output_path}")
+
+        pbar = tqdm(total=total_frames or None, desc="Rendering")
+
         frame_idx = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # 从‘坐标手册’中提取当前帧经过修复的 BallPoint
-            current_point = refined_dict.get(frame_idx, BallPoint(is_detected=False))
-            
-            # 调用 visualizer 执行渲染逻辑（半径衰减等）
-            rendered_frame = self.visualizer.render(frame, current_point)
-            
-            out.write(rendered_frame)
-            frame_idx += 1
-            pbar.update(1)
-            
-        pbar.close()
-        cap.release()
-        out.release()
+        try:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                # 从‘坐标手册’中提取当前帧经过修复的 BallPoint
+                current_point = refined_dict.get(frame_idx, BallPoint(is_detected=False))
+
+                # 调用 visualizer 执行渲染逻辑（半径衰减等）
+                rendered_frame = self.visualizer.render(frame, current_point)
+
+                out.write(rendered_frame)
+                frame_idx += 1
+                pbar.update(1)
+        finally:
+            pbar.close()
+            cap.release()
+            out.release()

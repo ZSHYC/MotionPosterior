@@ -3,8 +3,7 @@ import torch
 import cv2
 import numpy as np
 import argparse
-import os
-import math # 确保 math 被导入
+import math
 import csv
 from pathlib import Path
 from tqdm import tqdm
@@ -25,12 +24,6 @@ MODEL_CONFIGS = {
         neck=dict(type='TrackNetV2Neck'),
         head=dict(type='TrackNetV2Head', in_channels=64, out_channels=3)
     ),
-    'v4': dict(
-        type='TrackNetV4',
-        backbone=dict(type='TrackNetV4Backbone', in_channels=9),
-        neck=dict(type='TrackNetV4Neck'),
-        head=dict(type='TrackNetV2Head', in_channels=64, out_channels=3)
-    ),
     'v5': dict(
         type='TrackNetV5',
         backbone=dict(type='TrackNetV2Backbone', in_channels=13),
@@ -38,6 +31,44 @@ MODEL_CONFIGS = {
         head=dict(type='R_STRHead', in_channels=64, out_channels=3)
     )
 }
+
+INPUT_HEIGHT = 288
+INPUT_WIDTH = 512
+CANONICAL_FIELDS = [
+    'benchmark_id',
+    'video_name',
+    'frame_number',
+    'detected',
+    'x_512',
+    'y_288',
+    'x_orig',
+    'y_orig',
+    'conf',
+    'fps',
+    'width',
+    'height',
+]
+
+
+def canonical_row(sample_id, video_name, frame_number, coords, fps, width, height):
+    """Build one project-compatible trajectory row."""
+    detected = coords is not None
+    x_model, y_model, conf = coords if detected else (None, None, 0.0)
+    return {
+        'benchmark_id': sample_id,
+        'video_name': video_name,
+        'frame_number': frame_number,
+        'detected': int(detected),
+        'x_512': x_model,
+        'y_288': y_model,
+        'x_orig': x_model * width / INPUT_WIDTH if detected else None,
+        'y_orig': y_model * height / INPUT_HEIGHT if detected else None,
+        'conf': conf,
+        'fps': fps,
+        'width': width,
+        'height': height,
+    }
+
 
 # --- 2. 辅助函数 (✨ 已修改，与你的 Metric 脚本对齐) ---
 def _heatmap_to_coords(heatmap: np.ndarray, threshold: int = 127):
@@ -123,165 +154,177 @@ def draw_comet_tail(frame, points_deque, head_radius=8):
 
 # --- 3. “核心加工车间”: ✨ process_video (✨ 已修改) ✨ ---
 def process_video(video_path: Path, model, device, args, output_root_dir: Path) -> dict:
-    """
-    处理单个视频文件，并生成所有需要的输出文件。
-    新逻辑：一次读取 3 帧，推理 3 帧，写入 3 帧，然后跳 3 帧。
-    ✨ 新增: 返回一个包含统计数据的字典。
-    """
+    """Run inference and write one canonical trajectory CSV."""
+    threshold = float(args.threshold)
+    if not math.isfinite(threshold) or not 0 <= threshold < 1:
+        raise ValueError(f"threshold must be a finite value in [0, 1), got {args.threshold}")
     print(f"\n🏭 Processing video: {video_path.name}")
-    
-    video_output_dir = output_root_dir / video_path.stem
-    video_output_dir.mkdir(parents=True, exist_ok=True)
-    
-    cap = cv2.VideoCapture(str(video_path))
+    output_root_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- ✨ 新增：获取视频原始分辨率 ---
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Unable to open video: {video_path}")
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    metadata_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    if width <= 0 or height <= 0 or not math.isfinite(fps) or fps <= 0:
+        cap.release()
+        raise ValueError(f"Invalid video metadata: {video_path}")
+    if width * 9 != height * 16:
+        cap.release()
+        raise ValueError(
+            f"TrackNetV5 requires 16:9 video, got {width}x{height}: {video_path}"
+        )
     resolution_str = f"{width}x{height}"
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    
-    input_size = (288, 512)
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    
-    trajectory_video_path = video_output_dir / f"{video_path.stem}_trajectory.mp4"
-    comparison_video_path = video_output_dir / f"{video_path.stem}_comparison.mp4"
-    csv_path = video_output_dir / f"{video_path.stem}_data.csv"
-    
-    writer_traj = cv2.VideoWriter(str(trajectory_video_path), fourcc, fps, (input_size[1], input_size[0]))
-    writer_comp = cv2.VideoWriter(str(comparison_video_path), fourcc, fps, (input_size[1] * 2, input_size[0]))
+    csv_path = output_root_dir / f"{video_path.stem}.csv"
+    visualization_dir = getattr(args, 'visualization_dir', None)
+    writer_traj = None
+    writer_comp = None
+    if visualization_dir:
+        video_output_dir = Path(visualization_dir) / video_path.stem
+        video_output_dir.mkdir(parents=True, exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer_traj = cv2.VideoWriter(
+            str(video_output_dir / f"{video_path.stem}_trajectory.mp4"),
+            fourcc,
+            fps,
+            (INPUT_WIDTH, INPUT_HEIGHT),
+        )
+        writer_comp = cv2.VideoWriter(
+            str(video_output_dir / f"{video_path.stem}_comparison.mp4"),
+            fourcc,
+            fps,
+            (INPUT_WIDTH * 2, INPUT_HEIGHT),
+        )
+        if not writer_traj.isOpened() or not writer_comp.isOpened():
+            cap.release()
+            writer_traj.release()
+            writer_comp.release()
+            raise ValueError(f"Unable to open visualization writers: {video_output_dir}")
 
-    trajectory_points = deque(maxlen=fps) 
-    
+    trajectory_points = deque(maxlen=max(1, round(fps)))
     csv_data = []
     detected_frames_count = 0
-    
-    # 预处理转换（保持不变）
-    resizer = Resize(keys=['path_prev', 'path', 'path_next'], size=input_size)
+    resizer = Resize(
+        keys=['path_prev', 'path', 'path_next'],
+        size=(INPUT_HEIGHT, INPUT_WIDTH),
+    )
     concatenator = ConcatChannels(
         keys=['path_prev', 'path', 'path_next'],
         output_key='image'
     )
-    
-    # --- 新的循环逻辑 ---
-    frame_idx_counter = 0
-    iteration_count = 0
-    pbar = tqdm(total=total_frames, desc=f"Processing {video_path.stem}")
-    start_time = time.time() # 记录开始时间
+    decoded_frame_count = 0
+    pbar = tqdm(total=metadata_frame_count or None, desc=f"Processing {video_path.stem}")
+    start_time = time.time()
 
-    while cap.isOpened():
-        # 1. 一次性读取 3 帧
-        ret1, frame1 = cap.read()
-        ret2, frame2 = cap.read()
-        ret3, frame3 = cap.read()
+    try:
+        while cap.isOpened():
+            frames = []
+            for _ in range(3):
+                readable, frame = cap.read()
+                if not readable:
+                    break
+                frames.append(frame)
+            if not frames:
+                break
+            actual_frame_count = len(frames)
+            while len(frames) < 3:
+                frames.append(frames[-1])
 
-        # 如果任何一帧读取失败（视频末尾），则终止循环
-        if not ret1 or not ret2 or not ret3:
-            break
+            rgb_frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
+            data_dict = {
+                'path_prev': rgb_frames[0],
+                'path': rgb_frames[1],
+                'path_next': rgb_frames[2],
+            }
+            data_dict = concatenator(resizer(data_dict))
+            resized_frames = [
+                data_dict['path_prev'],
+                data_dict['path'],
+                data_dict['path_next'],
+            ]
+            image_np = data_dict['image']
+            image_tensor = torch.from_numpy(
+                image_np.transpose(2, 0, 1)
+            ).float().div(255).unsqueeze(0).to(device)
 
-        # 2. 准备模型输入
-        frame1_rgb = cv2.cvtColor(frame1, cv2.COLOR_BGR2RGB)
-        frame2_rgb = cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB)
-        frame3_rgb = cv2.cvtColor(frame3, cv2.COLOR_BGR2RGB)
-        
-        data_dict = {'path_prev': frame1_rgb, 'path': frame2_rgb, 'path_next': frame3_rgb}
-        data_dict = resizer(data_dict)
-        data_dict = concatenator(data_dict)
-        
-        resized_frames = [data_dict['path_prev'], data_dict['path'], data_dict['path_next']]
-        
-        image_np = data_dict['image']
-        image_tensor = torch.from_numpy(image_np.transpose(2, 0, 1)).float().div(255).unsqueeze(0).to(device)
+            with torch.no_grad():
+                heatmaps_np = model(image_tensor).squeeze(0).cpu().numpy()
+            if heatmaps_np.shape != (3, INPUT_HEIGHT, INPUT_WIDTH):
+                raise ValueError(
+                    f"Unexpected model output shape: {heatmaps_np.shape}, "
+                    f"expected {(3, INPUT_HEIGHT, INPUT_WIDTH)}"
+                )
+            threshold_uint8 = int(threshold * 255)
 
-        # 3. 批量推理
-        with torch.no_grad():
-            # heatmap_preds 的形状是 [1, 3, H, W]
-            heatmap_preds = model(image_tensor)
-        
-        # 移除 batch 维度，得到 (3, H, W) 的 NumPy 数组
-        heatmaps_np = heatmap_preds.squeeze(0).cpu().numpy()
-        threshold_uint8 = int(args.threshold * 255) # 阈值仍然由参数控制
+            for offset, single_heatmap_np in enumerate(
+                heatmaps_np[:actual_frame_count]
+            ):
+                heatmap_uint8 = (single_heatmap_np * 255).astype(np.uint8)
+                coords = _heatmap_to_coords(heatmap_uint8, threshold=threshold_uint8)
+                if coords is not None:
+                    detected_frames_count += 1
+                    trajectory_points.append(coords)
+                else:
+                    trajectory_points.append(None)
+                csv_data.append(canonical_row(
+                    video_path.stem,
+                    video_path.name,
+                    decoded_frame_count + offset,
+                    coords,
+                    fps,
+                    width,
+                    height,
+                ))
 
-        # 4. 循环处理这 3 帧的结果
-        for i in range(3):
-            current_frame_idx = frame_idx_counter + i
-            # 确保不会因为最后几帧凑不满3帧而出错
-            if current_frame_idx >= total_frames:
-                continue
+                if writer_traj is not None and writer_comp is not None:
+                    frame_to_draw = cv2.cvtColor(resized_frames[offset], cv2.COLOR_RGB2BGR)
+                    final_traj_frame = draw_comet_tail(frame_to_draw, trajectory_points)
+                    writer_traj.write(final_traj_frame)
+                    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+                    writer_comp.write(np.hstack((final_traj_frame, heatmap_color)))
 
-            single_heatmap_np = heatmaps_np[i] # 形状 (H, W)
-            heatmap_uint8 = (single_heatmap_np * 255).astype(np.uint8)
+            decoded_frame_count += actual_frame_count
+            pbar.update(actual_frame_count)
+            if actual_frame_count < 3:
+                break
+    finally:
+        pbar.close()
+        cap.release()
+        if writer_traj is not None:
+            writer_traj.release()
+        if writer_comp is not None:
+            writer_comp.release()
 
-            # (A) 提取坐标 (✨ 已修改：简化调用)
-            coords = _heatmap_to_coords(
-                heatmap_uint8, 
-                threshold=threshold_uint8
-            )
-            
-            # (B) 记录 CSV 和轨迹
-            if coords is not None:
-                detected_frames_count += 1
-                trajectory_points.append(coords)
-                csv_row = {'frame_number': current_frame_idx, 'detected': 1, 'x': coords[0], 'y': coords[1]}
-            else:
-                trajectory_points.append(None)
-                csv_row = {'frame_number': current_frame_idx, 'detected': 0, 'x': 0.0, 'y': 0.0}
-            csv_data.append(csv_row)
-            
-            # (C) 绘制和写入视频
-            frame_to_draw = cv2.cvtColor(resized_frames[i], cv2.COLOR_RGB2BGR)
-            
-            # 绘制轨迹视频
-            final_traj_frame = draw_comet_tail(frame_to_draw, trajectory_points)
-            writer_traj.write(final_traj_frame)
+    total_duration = time.time() - start_time
+    processing_fps = decoded_frame_count / total_duration if total_duration > 0 else 0
+    print(
+        f"⏱️  Processed {decoded_frame_count} frames of {resolution_str} "
+        f"in {total_duration:.2f} seconds. Avg: {processing_fps:.2f} frames/sec."
+    )
 
-            # 绘制对比视频
-            heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-            combined_frame = np.hstack((final_traj_frame, heatmap_color))
-            writer_comp.write(combined_frame)
-
-        # 5. 更新计数器和进度条 (关键！)
-        frame_idx_counter += 3
-        iteration_count += 1
-        pbar.update(3)
-    
-    # --- 循环结束后的清理 ---
-
-    end_time = time.time()
-    total_duration = end_time - start_time
-    # 平均每秒处理多少个 iteration (每 iteration 处理 3 帧)
-    avg_it_per_sec = iteration_count * 3 / total_duration if total_duration > 0 else 0
-    print(f"⏱️  Processed {iteration_count * 3} frames of {resolution_str} in {total_duration:.2f} seconds. Avg: {avg_it_per_sec:.2f} frames/sec.")
-    pbar.close() # 关闭进度条
-
-    detection_ratio = (detected_frames_count / total_frames) if total_frames > 0 else 0
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['frame_number', 'detected', 'x', 'y'])
+    detection_ratio = (
+        detected_frames_count / decoded_frame_count if decoded_frame_count > 0 else 0
+    )
+    with csv_path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=CANONICAL_FIELDS)
         writer.writeheader()
         writer.writerows(csv_data)
-        f.write("\n")
-        f.write(f"total_detected_frame,{detected_frames_count}\n")
-        f.write(f"detection_ratio,{detection_ratio:.4f}\n")
+    print(f"✅ Finished processing. Trajectory saved to: {csv_path}")
 
-    cap.release()
-    writer_traj.release()
-    writer_comp.release()
-    print(f"✅ Finished processing. Results saved in: {video_output_dir}")
-    
-    # ✨ 新增：返回统计结果
     stats = {
         'video_name': video_path.name,
         'detected_frames': detected_frames_count,
-        'total_frames': total_frames,
+        'total_frames': decoded_frame_count,
         'detection_ratio': round(detection_ratio, 4)
     }
     return stats
 
 
 # --- 4. “总调度室”: ✨ main (✨ 已修改) ✨ ---
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="TrackNet Batch Inference Pipeline")
     parser.add_argument('input_dir', type=str, help='Path to the directory containing input videos.')
     parser.add_argument('weights_path', type=str, help='Path to the model weights (.pth file).')
@@ -291,38 +334,44 @@ def main():
         '--arch', 
         type=str, 
         required=True, 
-        choices=['v2', 'v4', 'v5'], 
-        help='Model architecture to use (v2, v4, or v5).'
+        choices=['v2', 'v5'],
+        help='Model architecture to use (v2 or v5).'
     )
     
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for inference (e.g., "cuda:0" or "cpu").')
-    
-    # ✨ 唯一可调的后处理参数 ✨
-    parser.add_argument('--threshold', type=float, default=0.5, help='Confidence threshold for detection (0-1).')
+    parser.add_argument(
+        '--threshold',
+        type=float,
+        default=0.5,
+        help='Confidence threshold for detection [0, 1).',
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=Path,
+        required=True,
+        help='Directory for canonical per-video trajectory CSV files.',
+    )
+    parser.add_argument(
+        '--visualization-dir',
+        type=Path,
+        default=None,
+        help='Optional directory for trajectory and heatmap videos.',
+    )
+    return parser
 
-    # ✨✨✨ 已删除 --min-circularity 和 --min-area ✨✨✨
-    
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
-    # ✨ 动态获取模型配置
-    model_cfg = MODEL_CONFIGS.get(args.arch)
-    if model_cfg is None:
-        print(f"❌ 错误：未知的架构 '{args.arch}'。请从 'v2', 'v4', 'v5' 中选择。")
-        return
-        
-    print(f"🚀 Starting Batch Inference Pipeline for [TrackNet {args.arch.upper()}]...")
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    
-    model = build_model(model_cfg)
-    model.load_state_dict(torch.load(args.weights_path, map_location='cpu'))
-    model.to(device).eval()
-    print(f"✅ Model loaded from {args.weights_path} and sent to {device}.")
-
     input_dir = Path(args.input_dir)
-    
-    # ✨ 动态设置输出目录
-    output_root_dir = input_dir / args.arch 
-    output_root_dir.mkdir(exist_ok=True)
+    weights_path = Path(args.weights_path)
+    if not input_dir.is_dir():
+        parser.error(f"input_dir is not a directory: {input_dir}")
+    if not weights_path.is_file():
+        parser.error(f"weights_path is not a file: {weights_path}")
+    if not math.isfinite(args.threshold) or not 0 <= args.threshold < 1:
+        parser.error(f"threshold must be a finite value in [0, 1), got {args.threshold}")
     
     print("🔎 Searching for .mp4 and .mov files...")
     video_files = []
@@ -331,52 +380,42 @@ def main():
         video_files.extend(input_dir.glob(fmt))
     
     if not video_files:
-        print(f"❌ No supported video files (.mp4, .mov) found in {input_dir}. Exiting.")
-        return
+        parser.error(f"No supported video files (.mp4, .mov) found in {input_dir}")
         
-    video_files = sorted(list(set(video_files)))
+    video_files = sorted(set(video_files))
+    duplicate_stems = sorted(
+        stem for stem in {path.stem for path in video_files}
+        if sum(path.stem == stem for path in video_files) > 1
+    )
+    if duplicate_stems:
+        parser.error(f"video stems must be unique: {duplicate_stems}")
     print(f"Found {len(video_files)} videos to process.")
+
+    model_cfg = MODEL_CONFIGS[args.arch]
+    print(f"🚀 Starting Batch Inference Pipeline for [TrackNet {args.arch.upper()}]...")
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    model = build_model(model_cfg)
+    model.load_state_dict(torch.load(weights_path, map_location='cpu'))
+    model.to(device).eval()
+    print(f"✅ Model loaded from {weights_path} and sent to {device}.")
+
+    output_root_dir = args.output_dir
+    output_root_dir.mkdir(parents=True, exist_ok=True)
     
     # ✨ 1. 初始化汇总列表
     summary_data_list = [] 
     
     for video_path in video_files:
-        # ✨ 2. 收集每个视频的返回结果
-        try:
-            video_stats = process_video(video_path, model, device, args, output_root_dir)
-            if video_stats:
-                summary_data_list.append(video_stats)
-        except Exception as e:
-            print(f"❌ ERROR processing {video_path.name}: {e}")
-            print("Skipping this video and continuing...")
+        summary_data_list.append(
+            process_video(video_path, model, device, args, output_root_dir)
+        )
 
-    # ✨ 3. 循环结束后，写入全局汇总CSV
-    if summary_data_list:
-        summary_csv_path = output_root_dir / f"_summary_report_{args.arch}.csv"
-        print(f"\n📊 Writing summary report to {summary_csv_path}")
-        
-        fieldnames = ['video_name', 'detected_frames', 'total_frames', 'detection_ratio']
-        # 定义中文表头
-        chinese_header_map = {
-            'video_name': '视频名',
-            'detected_frames': '检测到的球帧数',
-            'total_frames': '视频总帧数',
-            'detection_ratio': '检测比率'
-        }
-        
-        try:
-            with open(summary_csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                # 写入UTF-8 BOM头和中文表头
-                writer = csv.writer(f)
-                writer.writerow([chinese_header_map[field] for field in fieldnames])
-                
-                # 使用 DictWriter 写入数据行
-                dict_writer = csv.DictWriter(f, fieldnames=fieldnames)
-                dict_writer.writerows(summary_data_list)
-        except Exception as e:
-            print(f"❌ ERROR writing summary CSV: {e}")
-            
-    print(f"\n🎉🎉🎉 All videos processed! Check the results in: {output_root_dir} 🎉🎉🎉")
+    total_frames = sum(item['total_frames'] for item in summary_data_list)
+    detected_frames = sum(item['detected_frames'] for item in summary_data_list)
+    print(
+        f"\nAll videos processed: videos={len(summary_data_list)}, "
+        f"frames={total_frames}, detected={detected_frames}, output={output_root_dir}"
+    )
 
 
 if __name__ == '__main__':

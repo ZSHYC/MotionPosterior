@@ -11,7 +11,7 @@ The core architecture and algorithmic logic of TrackNetV5 are based on our lates
 
 ## Core Specifications
 
-* **Architecture Support**: Specifically designed for the TrackNetV5 architecture; but also implement V2/V4 versions in pytorch.
+* **Architecture Support**: Supports TrackNetV5 and V2. The unregistered V4 implementation is not exposed as an inference option.
 * **Integrated Features**: Encapsulates three-frame sliding window inference, Gaussian heatmap centroid extraction, trajectory enhancement visualization, and an industrial-grade training pipeline.
 * **Confidentiality Notice**: Model weights and training datasets are proprietary assets of the company and are currently not open to the public.
 
@@ -101,18 +101,30 @@ The inference module supports batch video processing and structured data export.
 ### Execution Command
 
 ```bash
-python track.py <input_dir> <weights_path> --arch v2/v4/v5 --threshold 0.5 --device cuda:0
-
+python track.py <input_dir> <weights_path> \
+  --arch v5 \
+  --output-dir <trajectory_csv_dir> \
+  --threshold 0.5 \
+  --device cuda:0
 ```
 
 ### Output Description
 
-Results are organized under `input_dir/{arch}/` by video filename:
+Each input video produces one same-stem CSV in `trajectory_csv_dir`; for example,
+`20260706_001.mp4` produces `20260706_001.csv`. The schema is:
 
-* `_summary_report_{arch}.csv`: Summary of detection rates and frame statistics for all processed videos.
-* `*_data.csv`: Frame-by-frame coordinate mapping (including detection status and `cx`, `cy` centroids).
-* `*_trajectory.mp4`: **Enhanced trajectory video** (featuring a "comet tail" effect).
-* `*_comparison.mp4`: Synchronized side-by-side comparison of the original video and predicted heatmaps.
+```text
+benchmark_id,video_name,frame_number,detected,x_512,y_288,x_orig,y_orig,conf,fps,width,height
+```
+
+Frame numbers are zero-based and every decoded frame has one row.
+`x_512/y_288` are model-space coordinates; `x_orig/y_orig` are scaled to the
+source-video metadata. TrackNetV5 has a fixed `512×288` model input, so source
+videos must be 16:9. Detection statistics are printed to the terminal and are
+not appended to the CSV.
+
+Visualization videos are disabled by default. Add
+`--visualization-dir <visualization_dir>` when needed.
 
 ---
 
