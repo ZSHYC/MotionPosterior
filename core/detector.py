@@ -29,14 +29,24 @@ MODEL_CONFIGS = {
             motion_channels=4,
             use_motion_tokens=True,
         )
-    )
+    ),
+    'motion3': dict(
+        type='TrackNetMotion',
+        num_frames=3,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
+    ),
+    'motion5': dict(
+        type='TrackNetMotion',
+        num_frames=5,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
+    ),
 }
 
 class TrackNetDetector:
     def __init__(self, arch, weights_path, device='cuda:0', threshold=0.5):
         """
         Stage 1: 检测器
-        :param arch: 架构版本 ('v2', 'v5')
+        :param arch: 架构版本 ('v2', 'v5', 'motion3', 'motion5')
         :param weights_path: .pth 权重文件路径
         :param device: 设备 (如 'cuda:0' 或 'cpu')
         :param threshold: 热力图激活阈值
@@ -54,16 +64,26 @@ class TrackNetDetector:
 
         # 2. 构建并加载模型
         self.model = build_model(model_cfg)
+        self.num_frames = int(getattr(self.model, 'num_frames', model_cfg.get('num_frames', 3)))
+        if self.num_frames not in (3, 5):
+            raise ValueError(f'num_frames must be 3 or 5, got {self.num_frames}')
         self.model.load_state_dict(torch.load(weights_path, map_location='cpu'))
         self.model.to(self.device).eval()
         print(f"✅ Detector initialized with [{arch.upper()}] model on {self.device}")
 
         # 3. 初始化变换算子
-        self.resizer = Resize(keys=['p', 'c', 'n'], size=self.input_size)
-        self.concator = ConcatChannels(keys=['p', 'c', 'n'], output_key='img')
+        self.frame_keys = [f'frame_{idx}' for idx in range(self.num_frames)]
+        self.resizer = Resize(keys=self.frame_keys, size=self.input_size)
+        self.concator = ConcatChannels(keys=self.frame_keys, output_key='img')
 
     def detect_video(self, video_path: str) -> list:
         """执行全视频扫描并返回原始 BallPoint 列表"""
+        num_frames = int(getattr(self, 'num_frames', 3))
+        default_keys = [f'frame_{idx}' for idx in range(num_frames)]
+        frame_keys = getattr(self, 'frame_keys', None)
+        if frame_keys is None:
+            frame_keys = list(getattr(getattr(self, 'resizer', None), 'keys', default_keys))
+        num_frames = len(frame_keys)
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError(f"Unable to open video: {video_path}")
@@ -81,7 +101,7 @@ class TrackNetDetector:
         try:
             while cap.isOpened():
                 frames = []
-                for _ in range(3):
+                for _ in range(num_frames):
                     readable, frame = cap.read()
                     if not readable:
                         break
@@ -89,13 +109,12 @@ class TrackNetDetector:
                 if not frames:
                     break
                 actual_frame_count = len(frames)
-                while len(frames) < 3:
+                while len(frames) < num_frames:
                     frames.append(frames[-1])
 
                 batch_data = {
-                    'p': cv2.cvtColor(frames[0], cv2.COLOR_BGR2RGB),
-                    'c': cv2.cvtColor(frames[1], cv2.COLOR_BGR2RGB),
-                    'n': cv2.cvtColor(frames[2], cv2.COLOR_BGR2RGB)
+                    key: cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    for key, frame in zip(frame_keys, frames)
                 }
                 batch_data = self.concator(self.resizer(batch_data))
                 img_tensor = torch.from_numpy(batch_data['img'].transpose(2, 0, 1))
@@ -103,10 +122,10 @@ class TrackNetDetector:
 
                 with torch.no_grad():
                     heatmap_preds = self.model(img_tensor).squeeze(0).cpu().numpy()
-                if heatmap_preds.shape != (3, *self.input_size):
+                if heatmap_preds.shape != (num_frames, *self.input_size):
                     raise ValueError(
                         f"Unexpected model output shape: {heatmap_preds.shape}, "
-                        f"expected {(3, *self.input_size)}"
+                        f"expected {(num_frames, *self.input_size)}"
                     )
 
                 for heatmap in heatmap_preds[:actual_frame_count]:
@@ -117,7 +136,7 @@ class TrackNetDetector:
                     raw_points.append(point)
 
                 pbar.update(actual_frame_count)
-                if actual_frame_count < 3:
+                if actual_frame_count < num_frames:
                     break
         finally:
             pbar.close()

@@ -11,8 +11,8 @@ The core architecture and algorithmic logic of TrackNetV5 are based on our lates
 
 ## Core Specifications
 
-* **Architecture Support**: Supports TrackNetV5 and V2. The unregistered V4 implementation is not exposed as an inference option.
-* **Integrated Features**: Encapsulates three-frame sliding window inference, Gaussian heatmap centroid extraction, trajectory enhancement visualization, and an industrial-grade training pipeline.
+* **Architecture Support**: Supports TrackNetV5, V2, and the new `TrackNetMotion` (3/5-frame) path. The unregistered V4 implementation is not exposed as an inference option.
+* **Integrated Features**: Encapsulates configurable three- or five-frame inference, Gaussian heatmap centroid extraction, trajectory enhancement visualization, and an industrial-grade training pipeline.
 * **Confidentiality Notice**: Model weights and training datasets are proprietary assets of the company and are currently not open to the public.
 
 ---
@@ -55,20 +55,22 @@ Please strictly follow the directory structure and labeling specifications of th
 
 ### Preprocessing Script
 
-Use `tools/preprocess_data_gauss.py` to convert raw video frames and `Label.csv` into the spatio-temporal context tensors required by the V5 architecture.
+Use `tools/preprocess_data_gauss.py` to convert raw video frames and `Label.csv` into the spatio-temporal context tensors required by the model.
 
 ```bash
 python tools/preprocess_data_gauss.py \
     --input_dir <path_to_raw_data> \
     --output_dir <path_to_output> \
     --mode context \
+    --num-frames 3 \
     --train_rate 0.8 \
     --height 1080 --width 1920
 
 ```
 
 * **Key Parameters**:
-* `--mode`: Must be set to `context` (generates associative indices for the three-frame sliding window inference).
+* `--mode`: Use `context` for centered temporal windows.
+* `--num-frames`: Use `3` for the legacy CSV contract or `5` to generate `labels_context5_train.csv` and `labels_context5_val.csv`.
 * `--size` & `--variance`: Controls the radius and variance of the generated Gaussian spots.
 
 
@@ -140,6 +142,31 @@ The V5 path keeps its three RGB frames, four-channel MDD prompt, three heatmap o
 The upgrade deliberately avoids optical flow, deformable convolution, and new dependencies. It follows the short-term temporal-difference direction used in [LSTFE-Net (CVPR 2023)](https://openaccess.thecvf.com/content/CVPR2023/papers/Xiao_LSTFE-NetLong_Short-Term_Feature_Enhancement_Network_for_Video_Small_Object_Detection_CVPR_2023_paper.pdf), [Temporal Difference Learning (CVPR 2023)](https://openaccess.thecvf.com/content/CVPR2023/papers/Feng_Mutual_Information-Based_Temporal_Difference_Learning_for_Human_Pose_Estimation_in_CVPR_2023_paper.pdf), and [Look Back and Forth (CVPR 2022)](https://openaccess.thecvf.com/content/CVPR2022/papers/Isobe_Look_Back_and_Forth_Video_Super-Resolution_With_Explicit_Temporal_Difference_CVPR2022_paper.pdf). BasicVSR++ is kept as a future, heavier alignment direction rather than a direct dependency.
 
 The engineering design patterns, TrackNetV5 model details, and underlying inference logic are documented in our exclusive **Obsidian Visual Knowledge Base**.
+
+### TrackNetMotion upgrade (new)
+
+`TrackNetMotion` is a separate architecture so existing V2/V5 checkpoints keep their
+state-dict and three-frame contracts. It accepts either `[B, 9, H, W]` or
+`[B, 15, H, W]` and returns the same number of full-resolution heatmaps:
+
+```bash
+# Five-frame preprocessing and training configuration
+python tools/preprocess_data_gauss.py --input_dir <raw> --output_dir <data> \
+  --mode context --num-frames 5 --train_rate 0.8
+python train.py  # select configs/tracknetmotion_convnext_5frames.py
+
+# Five-frame inference
+python track.py <input_dir> <weights_path> --arch motion5 \
+  --output-dir <trajectory_csv_dir> --threshold 0.5 --device cuda:0
+```
+
+The new backbone is a ConvNeXt V2-inspired hierarchical encoder with GRN,
+full/half/quarter/eighth-resolution features, and local feature correlation at the
+quarter and eighth scales. The correlation uses valid temporal neighbors and a
+motion residual gate; it does not require an optical-flow dependency. The quarter
+scale is intentionally retained because aggressive downsampling can erase a fast,
+small ball. See [`docs/模型升级方案.md`](docs/模型升级方案.md) for the design rationale,
+constraints, and literature links.
 
 > [!IMPORTANT]
 > **Access**: The Obsidian repository is a private resource. For in-depth development, architectural study, or technical exchange, please contact the author via **Email** to request authorization.

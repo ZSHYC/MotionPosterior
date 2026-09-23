@@ -16,6 +16,11 @@ def create_gaussian_kernel(size, variance):
 
 
 def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
+    num_frames = config.get('num_frames', 3)
+    if num_frames not in (3, 5):
+        raise ValueError('num_frames must be 3 or 5')
+    if num_frames == 5 and mode != 'context':
+        raise ValueError('5-frame preprocessing is available for context mode only')
     gaussian_kernel = create_gaussian_kernel(config['size'], config['variance'])
     kernel_size = config['size']
     height, width = config['height'], config['width']
@@ -94,7 +99,7 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
             clip_df['visibility_next'] = clip_df['visibility'].shift(-1)
             clip_df['status_next'] = clip_df['status'].shift(-1)
 
-        elif mode == 'context':
+        elif mode == 'context' and num_frames == 3:
             # 添加前一帧和后一帧的路径和标签信息
             clip_df['path_prev'] = clip_df['path'].shift(1)
             clip_df['path_next'] = clip_df['path'].shift(-1)
@@ -115,8 +120,18 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
             clip_df['visibility_next'] = clip_df['visibility'].shift(-1)
             clip_df['status_next'] = clip_df['status'].shift(-1)
 
-        # 删除首尾帧（因为它们没有完整的前后帧）
-        clip_df = clip_df.iloc[1:-1]
+        elif mode == 'context' and num_frames == 5:
+            for suffix, offset in [('prev2', 2), ('prev', 1), ('next', -1), ('next2', -2)]:
+                clip_df[f'path_{suffix}'] = clip_df['path'].shift(offset)
+                clip_df[f'gt_path_{suffix}'] = clip_df['gt_path'].shift(offset)
+                clip_df[f'x_{suffix}'] = clip_df['x-coordinate'].shift(offset)
+                clip_df[f'y_{suffix}'] = clip_df['y-coordinate'].shift(offset)
+                clip_df[f'visibility_{suffix}'] = clip_df['visibility'].shift(offset)
+                clip_df[f'status_{suffix}'] = clip_df['status'].shift(offset)
+
+        # 删除没有完整时序上下文的首尾帧。
+        radius = num_frames // 2
+        clip_df = clip_df.iloc[radius:-radius]
 
         all_clip_dfs.append(clip_df)
 
@@ -132,13 +147,22 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
             'visibility_prev', 'visibility', 'visibility_next',  # 三个visibility
             'status_prev', 'status', 'status_next'  # 三个status
         ]
-    elif mode == 'context':
+    elif mode == 'context' and num_frames == 3:
         final_columns = [
             'path_prev', 'path', 'path_next',  # 三张图片路径：前一帧、当前帧、后一帧
             'gt_path_prev', 'gt_path', 'gt_path_next',  # 三张对应的gt图路径
             'x_prev', 'y_prev', 'x-coordinate', 'y-coordinate', 'x_next', 'y_next',  # 三个x,y坐标
             'visibility_prev', 'visibility', 'visibility_next',  # 三个visibility
             'status_prev', 'status', 'status_next'  # 三个status
+        ]
+    elif mode == 'context' and num_frames == 5:
+        final_columns = [
+            'path_prev2', 'path_prev', 'path', 'path_next', 'path_next2',
+            'gt_path_prev2', 'gt_path_prev', 'gt_path', 'gt_path_next', 'gt_path_next2',
+            'x_prev2', 'y_prev2', 'x_prev', 'y_prev', 'x-coordinate', 'y-coordinate',
+            'x_next', 'y_next', 'x_next2', 'y_next2',
+            'visibility_prev2', 'visibility_prev', 'visibility', 'visibility_next', 'visibility_next2',
+            'status_prev2', 'status_prev', 'status', 'status_next', 'status_next2'
         ]
 
     final_df = master_df[final_columns]
@@ -158,8 +182,9 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
     df_train = final_df.iloc[:num_train]
     df_val = final_df.iloc[num_train:]
 
-    train_csv_path = output_dir / f"labels_{mode}_train.csv"
-    val_csv_path = output_dir / f"labels_{mode}_val.csv"
+    label_suffix = f'{mode}5' if mode == 'context' and num_frames == 5 else mode
+    train_csv_path = output_dir / f"labels_{label_suffix}_train.csv"
+    val_csv_path = output_dir / f"labels_{label_suffix}_val.csv"
 
     df_train.to_csv(train_csv_path, index=False)
     df_val.to_csv(val_csv_path, index=False)
@@ -170,15 +195,11 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
 
     # 打印第一行数据作为示例
     print("\n📊 Example of first row in final dataset:")
-    print(f"Image paths: {df_train.iloc[0]['path_prev']}, {df_train.iloc[0]['path']}, {df_train.iloc[0]['path_next']}")
-    print(
-        f"GT paths: {df_train.iloc[0]['gt_path_prev']}, {df_train.iloc[0]['gt_path']}, {df_train.iloc[0]['gt_path_next']}")
-    print(
-        f"Coordinates: ({df_train.iloc[0]['x_prev']}, {df_train.iloc[0]['y_prev']}), ({df_train.iloc[0]['x_current']}, {df_train.iloc[0]['y_current']}), ({df_train.iloc[0]['x_next']}, {df_train.iloc[0]['y_next']})")
-    print(
-        f"Visibility: {df_train.iloc[0]['visibility_prev']}, {df_train.iloc[0]['visibility_current']}, {df_train.iloc[0]['visibility_next']}")
-    print(
-        f"Status: {df_train.iloc[0]['status_prev']}, {df_train.iloc[0]['status_current']}, {df_train.iloc[0]['status_next']}")
+    if not df_train.empty:
+        sample = df_train.iloc[0]
+        frame_labels = ('prev2', 'prev', 'current', 'next', 'next2') if num_frames == 5 else ('prev', 'current', 'next')
+        print("Image paths:", ', '.join(str(sample['path' if label == 'current' else f'path_{label}']) for label in frame_labels))
+        print("GT paths:", ', '.join(str(sample['gt_path' if label == 'current' else f'gt_path_{label}']) for label in frame_labels))
 
 
 if __name__ == '__main__':
@@ -187,6 +208,8 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', '-out', type=str, required=True,
                         help='Path to save the processed data and labels.')
     parser.add_argument('--mode', '-m', type=str, required=True, choices=['past', 'context'], help="Processing mode.")
+    parser.add_argument('--num-frames', type=int, choices=[3, 5], default=3,
+                        help='Temporal context length. 5 is supported for context mode.')
     parser.add_argument('--height', type=int, default=1080, help='Target image height.')
     parser.add_argument('--width', type=int, default=1920, help='Target image width.')
     parser.add_argument('--size', type=int, default=40, help='Radius of the Gaussian kernel.')
@@ -198,7 +221,7 @@ if __name__ == '__main__':
     config = {
         'height': args.height, 'width': args.width,
         'size': args.size, 'variance': args.variance,
-        'train_rate': args.train_rate
+        'train_rate': args.train_rate, 'num_frames': args.num_frames
     }
 
     print(config)

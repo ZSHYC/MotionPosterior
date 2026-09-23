@@ -35,7 +35,19 @@ MODEL_CONFIGS = {
             motion_channels=4,
             use_motion_tokens=True,
         )
-    )
+    ),
+    # Motion-aware ConvNeXt-style model.  ``motion3`` preserves the usual
+    # three-frame contract; ``motion5`` is the symmetric five-frame option.
+    'motion3': dict(
+        type='TrackNetMotion',
+        num_frames=3,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
+    ),
+    'motion5': dict(
+        type='TrackNetMotion',
+        num_frames=5,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
+    ),
 }
 
 INPUT_HEIGHT = 288
@@ -210,17 +222,15 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
             writer_comp.release()
             raise ValueError(f"Unable to open visualization writers: {video_output_dir}")
 
+    num_frames = int(getattr(model, 'num_frames', 3))
+    if num_frames not in (3, 5):
+        raise ValueError(f'model.num_frames must be 3 or 5, got {num_frames}')
+    frame_keys = [f'frame_{idx}' for idx in range(num_frames)]
     trajectory_points = deque(maxlen=max(1, round(fps)))
     csv_data = []
     detected_frames_count = 0
-    resizer = Resize(
-        keys=['path_prev', 'path', 'path_next'],
-        size=(INPUT_HEIGHT, INPUT_WIDTH),
-    )
-    concatenator = ConcatChannels(
-        keys=['path_prev', 'path', 'path_next'],
-        output_key='image'
-    )
+    resizer = Resize(keys=frame_keys, size=(INPUT_HEIGHT, INPUT_WIDTH))
+    concatenator = ConcatChannels(keys=frame_keys, output_key='image')
     decoded_frame_count = 0
     pbar = tqdm(total=metadata_frame_count or None, desc=f"Processing {video_path.stem}")
     start_time = time.time()
@@ -228,7 +238,7 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
     try:
         while cap.isOpened():
             frames = []
-            for _ in range(3):
+            for _ in range(num_frames):
                 readable, frame = cap.read()
                 if not readable:
                     break
@@ -236,21 +246,13 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
             if not frames:
                 break
             actual_frame_count = len(frames)
-            while len(frames) < 3:
+            while len(frames) < num_frames:
                 frames.append(frames[-1])
 
             rgb_frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
-            data_dict = {
-                'path_prev': rgb_frames[0],
-                'path': rgb_frames[1],
-                'path_next': rgb_frames[2],
-            }
+            data_dict = dict(zip(frame_keys, rgb_frames))
             data_dict = concatenator(resizer(data_dict))
-            resized_frames = [
-                data_dict['path_prev'],
-                data_dict['path'],
-                data_dict['path_next'],
-            ]
+            resized_frames = [data_dict[key] for key in frame_keys]
             image_np = data_dict['image']
             image_tensor = torch.from_numpy(
                 image_np.transpose(2, 0, 1)
@@ -258,10 +260,10 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
 
             with torch.no_grad():
                 heatmaps_np = model(image_tensor).squeeze(0).cpu().numpy()
-            if heatmaps_np.shape != (3, INPUT_HEIGHT, INPUT_WIDTH):
+            if heatmaps_np.shape != (num_frames, INPUT_HEIGHT, INPUT_WIDTH):
                 raise ValueError(
                     f"Unexpected model output shape: {heatmaps_np.shape}, "
-                    f"expected {(3, INPUT_HEIGHT, INPUT_WIDTH)}"
+                    f"expected {(num_frames, INPUT_HEIGHT, INPUT_WIDTH)}"
                 )
             threshold_uint8 = int(threshold * 255)
 
@@ -294,7 +296,7 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
 
             decoded_frame_count += actual_frame_count
             pbar.update(actual_frame_count)
-            if actual_frame_count < 3:
+            if actual_frame_count < num_frames:
                 break
     finally:
         pbar.close()
@@ -340,8 +342,8 @@ def build_parser():
         '--arch', 
         type=str, 
         required=True, 
-        choices=['v2', 'v5'],
-        help='Model architecture to use (v2 or v5).'
+        choices=sorted(MODEL_CONFIGS),
+        help='Model architecture. motion3/motion5 provide configurable temporal windows.'
     )
     
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for inference (e.g., "cuda:0" or "cpu").')

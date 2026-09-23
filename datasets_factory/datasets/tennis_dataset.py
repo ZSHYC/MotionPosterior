@@ -46,16 +46,18 @@ class TennisDataset(Dataset):
             **row_info
         }
 
-        # ✨✨✨ 整合坐标信息 ✨✨✨
-        # 识别所有坐标字段
-        x_fields = [k for k in row_info.keys() if k.startswith('x_') or k == 'x-coordinate']
-        y_fields = [k for k in row_info.keys() if k.startswith('y_') or k == 'y-coordinate']
-
-        # 确保字段顺序正确（prev, current, next）
-        x_fields_sorted = sorted(x_fields, key=lambda x:
-        {'x_prev': 0, 'x-coordinate': 1, 'x_current': 1, 'x_next': 2}.get(x, 3)) # 把列表排序，使得prev在前，current在中间，next在后
-        y_fields_sorted = sorted(y_fields, key=lambda x:
-        {'y_prev': 0, 'y-coordinate': 1, 'y_current': 1, 'y_next': 2}.get(x, 3)) # 把列表排序，使得prev在前，current在中间，next在后
+        # CSV 顺序是模型输入的时序契约；显式列出可用帧，避免字典/字母序改变它。
+        frame_order = ('prev2', 'prev', 'current', 'next', 'next2') if 'path_prev2' in row_info else ('prev', 'current', 'next')
+        x_fields_sorted = [
+            'x-coordinate' if label == 'current' else f'x_{label}'
+            for label in frame_order
+            if ('x-coordinate' if label == 'current' else f'x_{label}') in row_info
+        ]
+        y_fields_sorted = [
+            'y-coordinate' if label == 'current' else f'y_{label}'
+            for label in frame_order
+            if ('y-coordinate' if label == 'current' else f'y_{label}') in row_info
+        ]
 
         # 构建坐标列表
         coords_list = []
@@ -66,13 +68,11 @@ class TennisDataset(Dataset):
         if coords_list:
             results['coords'] = coords_list
 
-        # ✨✨✨ 整合可见性信息 ✨✨✨
-        # 识别所有可见性字段
-        vis_fields = [k for k in row_info.keys() if k.startswith('visibility')]
-
-        # 确保字段顺序正确（prev, current, next）
-        vis_fields_sorted = sorted(vis_fields, key=lambda x:
-        {'visibility_prev': 0, 'visibility': 1, 'visibility_current': 1, 'visibility_next': 2}.get(x, 3))
+        vis_fields_sorted = [
+            'visibility' if label == 'current' else f'visibility_{label}'
+            for label in frame_order
+            if ('visibility' if label == 'current' else f'visibility_{label}') in row_info
+        ]
 
         # 构建可见性列表
         visibility_list = []
@@ -84,7 +84,11 @@ class TennisDataset(Dataset):
             results['visibility'] = visibility_list
 
         # 识别所有图片路径字段（不包括gt路径）
-        img_fields = [k for k in row_info.keys() if 'path' in k and not k.startswith('gt_')]
+        img_fields = [
+            'path' if label == 'current' else f'path_{label}'
+            for label in frame_order
+            if ('path' if label == 'current' else f'path_{label}') in row_info
+        ]
         results['img_fields'] = img_fields
 
         # ✨✨✨ 关键修正：处理所有路径字段 ✨✨✨

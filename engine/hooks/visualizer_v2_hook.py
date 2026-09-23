@@ -54,10 +54,10 @@ class ValidationVisualizerV2Hook(BaseHook):
             if self.vis_count >= self.num_samples_to_save:
                 break
 
-            # --- 准备三帧原图 ---
-            # 输入形状为 [b, 9, h, w]，因为三帧RGB图像 (3帧 * 3通道)
+            num_frames = target_tensor.shape[1]
+            # --- 准备时序原图（支持三帧/五帧） ---
             input_frames = []
-            for frame_idx in range(3):  # 处理三帧
+            for frame_idx in range(num_frames):
                 # 获取当前帧的RGB通道 (3个通道)
                 frame_rgb = input_tensor[i, frame_idx * 3:(frame_idx + 1) * 3, :, :].permute(1, 2, 0).numpy()
                 frame_rgb = (frame_rgb * 255).astype(np.uint8)
@@ -66,17 +66,16 @@ class ValidationVisualizerV2Hook(BaseHook):
             h, w, _ = input_frames[0].shape  # 获取单帧尺寸
 
             # --- 准备GT热力图 ---
-            # target_tensor形状为 [b, 3, h, w]，对应三帧的GT热力图
             gt_heatmaps = []
-            for frame_idx in range(3):
+            for frame_idx in range(num_frames):
                 gt_heatmap = target_tensor[i, frame_idx].numpy().astype(np.uint8)
                 gt_heatmap_color = cv2.applyColorMap(gt_heatmap, cv2.COLORMAP_JET)
                 gt_heatmaps.append(gt_heatmap_color)
 
-            # --- 准备预测热力图（三帧）---
+            # --- 准备预测热力图 ---
             pred_heatmaps = []
             pred_coords = []  # 存储每帧的预测坐标
-            for frame_idx in range(3):
+            for frame_idx in range(num_frames):
                 pred_heatmap_np = pred_tensor[i, frame_idx].numpy().astype(np.uint8)
                 pred_heatmap_color = cv2.applyColorMap(pred_heatmap_np, cv2.COLORMAP_JET)
                 pred_heatmaps.append(pred_heatmap_color)
@@ -88,7 +87,7 @@ class ValidationVisualizerV2Hook(BaseHook):
             # --- 准备准确点 ---
             x_gt = []
             y_gt = []
-            for frame_idx in range(3):
+            for frame_idx in range(num_frames):
                 x_gt_raw = coords_gt_batch[frame_idx][0][i].item()
                 y_gt_raw = coords_gt_batch[frame_idx][1][i].item()
                 x_gt.append(x_gt_raw)
@@ -96,7 +95,7 @@ class ValidationVisualizerV2Hook(BaseHook):
 
             # 在所有帧原图上绘制标记
             frames_with_marks = []
-            for frame_idx in range(3):
+            for frame_idx in range(num_frames):
                 input_img = input_frames[frame_idx]
 
                 # 绘制绿色的真实标记
@@ -116,8 +115,8 @@ class ValidationVisualizerV2Hook(BaseHook):
 
 
             # --- 拼接画布 ---
-            canvas = np.zeros((h * 3, w * 3, 3), dtype=np.uint8)
-            for frame_idx in range(3):
+            canvas = np.zeros((h * num_frames, w * 3, 3), dtype=np.uint8)
+            for frame_idx in range(num_frames):
                 canvas[frame_idx * h:(frame_idx+1) * h, 0:w] = input_frames[frame_idx]
                 canvas[frame_idx * h:(frame_idx+1) * h, w:2 * w] = pred_heatmaps[frame_idx]
                 canvas[frame_idx * h:(frame_idx+1) * h, 2 * w:3 * w] = gt_heatmaps[frame_idx]

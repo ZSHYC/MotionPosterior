@@ -8,8 +8,8 @@ TrackNetV5 的核心架构与算法逻辑基于公司最新研究成果：
 
 ## 核心规格
 
-* **架构支持**：支持 TrackNetV5 与 V2；未完成注册的 V4 不作为公开推理选项。
-* **功能集成**：封装了三帧滑动窗口推理、高斯热力图质心提取、轨迹增强可视化及工业级训练流水线。
+* **架构支持**：支持 TrackNetV5、V2，以及新的 `TrackNetMotion` 三帧/五帧路径；未完成注册的 V4 不作为公开推理选项。
+* **功能集成**：封装了可配置的三帧/五帧时序推理、高斯热力图质心提取、轨迹增强可视化及训练流水线。
 * **保密声明**：模型权重与训练数据集属于公司内部核心资产，暂不公开。
 
 ---
@@ -50,20 +50,22 @@ pip install -r requirements.txt
 
 ### 预处理脚本
 
-使用 `tools/preprocess_data_gauss.py` 将原始视频帧与 `Label.csv` 转换为 V5 架构所需的时空上下文关联张量。
+使用 `tools/preprocess_data_gauss.py` 将原始视频帧与 `Label.csv` 转换为模型所需的时空上下文关联张量。
 
 ```bash
 python tools/preprocess_data_gauss.py \
     --input_dir <原始数据路径> \
     --output_dir <预处理输出路径> \
     --mode context \
+    --num-frames 3 \
     --train_rate 0.8 \
     --height 1080 --width 1920
 
 ```
 
 * **关键参数**：
-* `--mode`: 必须指定为 `context`（生成三帧滑动推理所需的关联索引）。
+* `--mode`: 使用 `context` 生成中心时序窗口。
+* `--num-frames`: `3` 保持旧 CSV 契约；`5` 生成 `labels_context5_train.csv` 与 `labels_context5_val.csv`。
 * `--size & --variance`: 控制生成高斯斑点的半径与方差。
 
 
@@ -140,6 +142,28 @@ benchmark_id,video_name,frame_number,detected,x_512,y_288,x_orig,y_orig,conf,fps
 * [BasicVSR++, CVPR 2022](https://openaccess.thecvf.com/content/CVPR2022/html/Chan_BasicVSR_Improving_Video_Super-Resolution_With_Enhanced_Propagation_and_Alignment_CVPR_2022_paper.html)：更重的传播与对齐方向，暂不直接移植到三帧热图任务。
 
 本仓库的工程设计模式、模型细节及底层逻辑已整理至专属的 **Obsidian 可视化知识库**。
+
+### TrackNetMotion 升级架构
+
+新增的 `TrackNetMotion` 独立于 V2/V5，因此不会改变已有权重的 state-dict 和三帧接口。它支持：
+
+* 输入 `[B, 9, H, W]`（三帧）或 `[B, 15, H, W]`（五帧）；
+* 输出与输入帧数相同的全分辨率热力图；
+* ConvNeXt V2 思路的分层骨干（GELU、GRN、深度卷积残差块）；
+* 在 1/4、1/8 尺度执行带有效边界掩码的局部跨帧特征相关，并用 motion residual gate 调制特征；
+* 保留高分辨率分支，避免高速小球在深层下采样中消失。
+
+五帧训练与推理：
+
+```bash
+python tools/preprocess_data_gauss.py --input_dir <raw> --output_dir <data> \
+  --mode context --num-frames 5 --train_rate 0.8
+python train.py  # 选择 configs/tracknetmotion_convnext_5frames.py
+python track.py <input_dir> <weights_path> --arch motion5 \
+  --output-dir <trajectory_csv_dir> --threshold 0.5 --device cuda:0
+```
+
+完整设计取舍、边界条件与顶会文献链接见 [`docs/模型升级方案.md`](docs/模型升级方案.md)。
 
 > [!IMPORTANT]
 > **获取途径**：该 Obsidian 仓库属于非公开资源。如有深度开发、架构学习或技术交流需求，请通过 **Email** 联系作者申请授权。
