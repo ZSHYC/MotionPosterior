@@ -29,8 +29,7 @@ class TrackNetV5(nn.Module):
             F3
         ], dim=1)
 
-        features = self.backbone(x)
+        features = self.backbone(x, motion_maps=mvdr_attention)
         refined_features = self.neck(features)
         logits = self.head(refined_features, mvdr_attention)
         return logits
-

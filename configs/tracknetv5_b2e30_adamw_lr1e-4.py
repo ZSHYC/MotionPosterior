@@ -9,7 +9,9 @@ model = dict(
     type='TrackNetV5',
     backbone=dict(
         type='TrackNetV2Backbone', # OK
-        in_channels=13
+        in_channels=13,
+        motion_channels=4,
+        use_motion_gates=True
     ),
     neck=dict(
         type='TrackNetV2Neck'# OK
@@ -17,7 +19,9 @@ model = dict(
     head=dict( 
         type='R_STRHead',
         in_channels=64,
-        out_channels=3
+        out_channels=3,
+        motion_channels=4,
+        use_motion_tokens=True
     )
 )
 

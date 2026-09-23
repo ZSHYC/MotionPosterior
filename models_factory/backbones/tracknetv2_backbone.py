@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 from ..builder import BACKBONES
 
-from ..basic import BasicConvBlock as ConvBlock
+from ..basic import BasicConvBlock as ConvBlock, MotionConditionedGate
 
 @BACKBONES.register_module
 class TrackNetV2Backbone(nn.Module):
-    def __init__(self, in_channels=9):
+    def __init__(self, in_channels=9, use_motion_gates=False, motion_channels=4):
         super().__init__()
         # --- Encoder Layers ---
         self.conv1 = ConvBlock(in_channels, 64)
@@ -25,30 +25,44 @@ class TrackNetV2Backbone(nn.Module):
         self.conv8 = ConvBlock(256, 512)
         self.conv9 = ConvBlock(512, 512)
         self.conv10 = ConvBlock(512, 512)
+        self.motion_gates = nn.ModuleDict({
+            name: MotionConditionedGate(channels, motion_channels)
+            for name, channels in (
+                ('skip1', 64), ('skip2', 128), ('skip3', 256), ('bottleneck', 512)
+            )
+        }) if use_motion_gates else None
 
-    def forward(self, x):
+    def forward(self, x, motion_maps=None):
         features = {}
 
         # --- Encoder ---
         x = self.conv1(x)
         x = self.conv2(x)
+        if self.motion_gates is not None:
+            x = self.motion_gates['skip1'](x, motion_maps)
         features['skip1'] = x
 
         x = self.pool1(x)
         x = self.conv3(x)
         x = self.conv4(x)
+        if self.motion_gates is not None:
+            x = self.motion_gates['skip2'](x, motion_maps)
         features['skip2'] = x
 
         x = self.pool2(x)
         x = self.conv5(x)
         x = self.conv6(x)
         x = self.conv7(x)
+        if self.motion_gates is not None:
+            x = self.motion_gates['skip3'](x, motion_maps)
         features['skip3'] = x
 
         x = self.pool3(x)
         x = self.conv8(x)
         x = self.conv9(x)
         x = self.conv10(x)
+        if self.motion_gates is not None:
+            x = self.motion_gates['bottleneck'](x, motion_maps)
         features['bottleneck'] = x
 
         return features

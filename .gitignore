@@ -3,4 +3,4 @@
 /workdirs
 *.pth
 /weights/*.pth
-.omc
+.omx

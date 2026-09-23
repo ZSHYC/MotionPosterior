@@ -27,7 +27,9 @@ class R_STRHead(nn.Module):
                  num_transformer_layers=4,
                  num_transformer_heads=2,
                  IsDraft=False,
-                 dropout=True
+                 dropout=True,
+                 use_motion_tokens=True,
+                 motion_channels=4
                  ):
         super().__init__()
         self.IsDraft = IsDraft
@@ -39,7 +41,7 @@ class R_STRHead(nn.Module):
         # 1. 草稿头 (保持你之前的修改: 1x1 Conv)
         self.draft_head = nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, bias=False) # V5_loveall 最高为False
 
-        # 2. Patch 嵌入层 (保持不变，我们坚持不引入 extra features)
+        # 2. Patch embedding for draft heatmaps and motion context
         self.embed_conv = nn.Conv2d(
             in_channels=1,  # 坚持只看 1 通道概率图
             out_channels=embed_dim,
@@ -55,6 +57,20 @@ class R_STRHead(nn.Module):
         self.spatial_pos_embed = nn.Parameter(torch.randn(1, num_patches_per_frame, embed_dim))
         self.time_embed = nn.Parameter(torch.randn(1, 3, embed_dim))
         self.context_dropout = nn.Dropout(p=0.1)
+        self.use_motion_tokens = use_motion_tokens
+        self.motion_embed_conv = (
+            nn.Conv2d(
+                motion_channels,
+                embed_dim,
+                kernel_size=patch_size,
+                stride=patch_size,
+            )
+            if use_motion_tokens else None
+        )
+        self.motion_embed = (
+            nn.Parameter(torch.zeros(1, num_patches_per_frame, embed_dim))
+            if use_motion_tokens else None
+        )
 
         # Transformer Encoder (保持不变)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -118,11 +134,18 @@ class R_STRHead(nn.Module):
         in_next = flat_next + self.spatial_pos_embed + time_next_embed
 
         # 3.5 拼接 & Transformer
-        final_input_with_pos = torch.cat([in_prev, in_curr, in_next], dim=1)
+        frame_tokens = torch.cat([in_prev, in_curr, in_next], dim=1)
+        final_input_with_pos = frame_tokens
+        if self.motion_embed_conv is not None and residual_maps is not None:
+            motion_tokens = self.motion_embed_conv(residual_maps)
+            motion_tokens = motion_tokens.flatten(2).permute(0, 2, 1)
+            motion_tokens = motion_tokens + self.spatial_pos_embed + self.motion_embed
+            final_input_with_pos = torch.cat([frame_tokens, motion_tokens], dim=1)
         repaired_sequence = self.transformer_encoder(final_input_with_pos)
 
         # 3.6 & 3.7 解码回 Logits
-        repaired_prev_flat, repaired_curr_flat, repaired_next_flat = torch.chunk(repaired_sequence, 3, dim=1)
+        frame_sequence = repaired_sequence[:, :3 * flat_prev.shape[1]]
+        repaired_prev_flat, repaired_curr_flat, repaired_next_flat = torch.chunk(frame_sequence, 3, dim=1)
 
         repaired_prev_feat = repaired_prev_flat.permute(0, 2, 1).reshape(B, self.embed_dim, H_feat, W_feat)
         repaired_curr_feat = repaired_curr_flat.permute(0, 2, 1).reshape(B, self.embed_dim, H_feat, W_feat)

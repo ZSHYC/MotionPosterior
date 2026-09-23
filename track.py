@@ -26,9 +26,15 @@ MODEL_CONFIGS = {
     ),
     'v5': dict(
         type='TrackNetV5',
-        backbone=dict(type='TrackNetV2Backbone', in_channels=13),
+        backbone=dict(type='TrackNetV2Backbone', in_channels=13, motion_channels=4, use_motion_gates=True),
         neck=dict(type='TrackNetV2Neck'),
-        head=dict(type='R_STRHead', in_channels=64, out_channels=3)
+        head=dict(
+            type='R_STRHead',
+            in_channels=64,
+            out_channels=3,
+            motion_channels=4,
+            use_motion_tokens=True,
+        )
     )
 }
 

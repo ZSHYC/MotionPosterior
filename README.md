@@ -130,6 +130,15 @@ Visualization videos are disabled by default. Add
 
 ## 5. Architecture Deep-Dive & Resources
 
+### Motion-aware V5 upgrade
+
+The V5 path keeps its three RGB frames, four-channel MDD prompt, three heatmap outputs, and inference contract. It now adds two internal motion paths:
+
+* `MotionConditionedGate` conditions `skip1`, `skip2`, `skip3`, and `bottleneck` on the signed MDD maps with spatial and channel gates.
+* `R_STRHead` patchifies the motion maps into context tokens and lets the existing temporal Transformer attend to them without changing the three-frame output shape or loss interface.
+
+The upgrade deliberately avoids optical flow, deformable convolution, and new dependencies. It follows the short-term temporal-difference direction used in [LSTFE-Net (CVPR 2023)](https://openaccess.thecvf.com/content/CVPR2023/papers/Xiao_LSTFE-NetLong_Short-Term_Feature_Enhancement_Network_for_Video_Small_Object_Detection_CVPR_2023_paper.pdf), [Temporal Difference Learning (CVPR 2023)](https://openaccess.thecvf.com/content/CVPR2023/papers/Feng_Mutual_Information-Based_Temporal_Difference_Learning_for_Human_Pose_Estimation_in_CVPR_2023_paper.pdf), and [Look Back and Forth (CVPR 2022)](https://openaccess.thecvf.com/content/CVPR2022/papers/Isobe_Look_Back_and_Forth_Video_Super-Resolution_With_Explicit_Temporal_Difference_CVPR2022_paper.pdf). BasicVSR++ is kept as a future, heavier alignment direction rather than a direct dependency.
+
 The engineering design patterns, TrackNetV5 model details, and underlying inference logic are documented in our exclusive **Obsidian Visual Knowledge Base**.
 
 > [!IMPORTANT]

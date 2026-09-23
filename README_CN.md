@@ -123,6 +123,22 @@ benchmark_id,video_name,frame_number,detected,x_512,y_288,x_orig,y_orig,conf,fps
 
 ## 5. 架构讲解与资源获取
 
+### V5 motion-aware 升级
+
+当前 V5 保留三帧 RGB、MDD 四通道亮暗差分、三帧热图输出和原有推理接口，同时在模型内部增加两层运动建模：
+
+* `MotionConditionedGate` 将 MDD 的 signed motion map 缩放到 `skip1/skip2/skip3/bottleneck` 四个尺度，联合生成空间门控和通道门控，让运动提示参与高分辨率细节和低分辨率语义。
+* `R_STRHead` 将差分图 patch 化为 motion tokens，与三帧 draft tokens 一起进入已有 Transformer。motion token 只作为上下文，不改变三帧输出的 token 数量、热图尺寸或损失接口。
+
+这次升级没有引入光流、DCN 或额外依赖。对于小球这类目标，优先保留短期邻帧的局部差分，避免把背景运动直接当成目标位移；后续若有数据和算力，再考虑局部对齐或短时记忆。
+
+设计参考：
+
+* [LSTFE-Net, CVPR 2023](https://openaccess.thecvf.com/content/CVPR2023/papers/Xiao_LSTFE-NetLong_Short-Term_Feature_Enhancement_Network_for_Video_Small_Object_Detection_CVPR_2023_paper.pdf)：短期邻帧与长期上下文分层融合，用于视频小目标。
+* [Mutual Information-Based Temporal Difference Learning, CVPR 2023](https://openaccess.thecvf.com/content/CVPR2023/papers/Feng_Mutual_Information-Based_Temporal_Difference_Learning_for_Human_Pose_Estimation_in_CVPR_2023_paper.pdf)：逐级时间差分编码和运动表示解耦。
+* [Look Back and Forth, CVPR 2022](https://openaccess.thecvf.com/content/CVPR2022/papers/Isobe_Look_Back_and_Forth_Video_Super-Resolution_With_Explicit_Temporal_Difference_CVPR2022_paper.pdf)：显式建模前后帧差异和残差细化。
+* [BasicVSR++, CVPR 2022](https://openaccess.thecvf.com/content/CVPR2022/html/Chan_BasicVSR_Improving_Video_Super-Resolution_With_Enhanced_Propagation_and_Alignment_CVPR_2022_paper.html)：更重的传播与对齐方向，暂不直接移植到三帧热图任务。
+
 本仓库的工程设计模式、模型细节及底层逻辑已整理至专属的 **Obsidian 可视化知识库**。
 
 > [!IMPORTANT]
