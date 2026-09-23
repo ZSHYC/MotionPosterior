@@ -67,7 +67,7 @@ class TrackNetV2Loss(nn.Module):
         centres, visible = self._target_centres(targets)
         offsets = prediction["offset"]
         visibility_logits = prediction.get("visibility_logits")
-        uncertainty = prediction.get("uncertainty")
+        log_variance = prediction.get("log_variance")
         aux = logits.new_zeros(())
         if offsets is not None:
             offset_error = F.smooth_l1_loss(offsets, centres, reduction="none").mean(dim=-1)
@@ -76,18 +76,28 @@ class TrackNetV2Loss(nn.Module):
             aux = aux + self.visibility_weight * F.binary_cross_entropy_with_logits(
                 visibility_logits, visible.float()
             )
-        if uncertainty is not None and offsets is not None:
-            squared_error = (offsets - centres).pow(2).sum(dim=-1).detach()
-            heteroscedastic = torch.exp(-uncertainty).clamp_max(20.0) * squared_error + uncertainty
-            aux = aux + self.uncertainty_weight * heteroscedastic.mean()
+        if log_variance is not None and offsets is not None:
+            squared_error = (offsets - centres).pow(2).sum(dim=-1)
+            heteroscedastic = torch.exp(-log_variance) * squared_error + log_variance
+            aux = aux + self.uncertainty_weight * (
+                heteroscedastic * visible.float()
+            ).sum() / visible.float().sum().clamp_min(1.0)
         if offsets is not None and offsets.shape[1] > 1:
             velocity = offsets[:, 1:] - offsets[:, :-1]
             target_velocity = centres[:, 1:] - centres[:, :-1]
-            aux = aux + self.trajectory_weight * F.smooth_l1_loss(velocity, target_velocity)
+            valid_pairs = visible[:, 1:] & visible[:, :-1]
+            velocity_error = F.smooth_l1_loss(velocity, target_velocity, reduction="none").mean(dim=-1)
+            aux = aux + self.trajectory_weight * (
+                velocity_error * valid_pairs.float()
+            ).sum() / valid_pairs.float().sum().clamp_min(1.0)
             if offsets.shape[1] > 2:
                 acceleration = velocity[:, 1:] - velocity[:, :-1]
                 target_acceleration = target_velocity[:, 1:] - target_velocity[:, :-1]
-                aux = aux + 0.5 * self.trajectory_weight * F.smooth_l1_loss(
-                    acceleration, target_acceleration
-                )
+                valid_triplets = visible[:, 2:] & visible[:, 1:-1] & visible[:, :-2]
+                acceleration_error = F.smooth_l1_loss(
+                    acceleration, target_acceleration, reduction="none"
+                ).mean(dim=-1)
+                aux = aux + 0.5 * self.trajectory_weight * (
+                    acceleration_error * valid_triplets.float()
+                ).sum() / valid_triplets.float().sum().clamp_min(1.0)
         return heat_loss + self.aux_weight * aux

@@ -49,31 +49,31 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
         gt_paths = []
         # ✨✨✨ 核心改动区域开始 ✨✨✨
         for _, row in clip_df.iterrows():
-            gt_path = gt_clip_output_dir / row['file name']
+            gt_path = gt_clip_output_dir / Path(row['file name']).with_suffix('.png')
             gt_paths.append(str(gt_path.relative_to(output_dir)))
 
-            # 仅在热力图文件不存在时创建，避免重复工作
-            if not gt_path.exists():
-                # 1. 首先，创建一个纯黑的画布
-                heatmap = np.zeros((height, width), dtype=np.uint8)
+            # Rebuild labels on each preprocessing run so old binary heatmaps
+            # cannot silently survive a switch to soft Gaussian supervision.
+            # 1. 首先，创建一个纯黑的画布
+            heatmap = np.zeros((height, width), dtype=np.uint8)
 
-                # 2. 只有当球可见且坐标存在时，才在画布上画高斯斑点
-                if row['visibility'] != 0 and pd.notna(row['x-coordinate']):
-                    x, y = int(row['x-coordinate']), int(row['y-coordinate'])
+            # 2. 只有当球可见且坐标存在时，才在画布上画高斯斑点
+            if row['visibility'] != 0 and pd.notna(row['x-coordinate']):
+                x, y = int(row['x-coordinate']), int(row['y-coordinate'])
 
-                    x_min, x_max = max(0, x - kernel_size), min(width, x + kernel_size + 1)
-                    y_min, y_max = max(0, y - kernel_size), min(height, y + kernel_size + 1)
+                x_min, x_max = max(0, x - kernel_size), min(width, x + kernel_size + 1)
+                y_min, y_max = max(0, y - kernel_size), min(height, y + kernel_size + 1)
 
-                    kernel_x_min = max(0, kernel_size - (x - x_min))
-                    kernel_x_max = kernel_size + (x_max - x)
-                    kernel_y_min = max(0, kernel_size - (y - y_min))
-                    kernel_y_max = kernel_size + (y_max - y)
+                kernel_x_min = max(0, kernel_size - (x - x_min))
+                kernel_x_max = kernel_size + (x_max - x)
+                kernel_y_min = max(0, kernel_size - (y - y_min))
+                kernel_y_max = kernel_size + (y_max - y)
 
-                    if x_max > x_min and y_max > y_min:
-                        heatmap[y_min:y_max, x_min:x_max] = gaussian_kernel[kernel_y_min:kernel_y_max,
-                                                            kernel_x_min:kernel_x_max]
-                # 3. 无论画布上是否有斑点，都将它保存下来
-                cv2.imwrite(str(gt_path), heatmap)
+                if x_max > x_min and y_max > y_min:
+                    heatmap[y_min:y_max, x_min:x_max] = gaussian_kernel[kernel_y_min:kernel_y_max,
+                                                        kernel_x_min:kernel_x_max]
+            # 3. 无论画布上是否有斑点，都将它保存下来
+            cv2.imwrite(str(gt_path), heatmap)
         # ✨✨✨ 核心改动区域结束 ✨✨✨
 
         clip_df['gt_path'] = gt_paths

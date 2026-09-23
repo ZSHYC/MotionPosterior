@@ -38,13 +38,12 @@ class TrackNetMotion(nn.Module):
         self.up_half = nn.Conv2d(d1 + d0, d0, 3, padding=1)
         self.up_full = nn.Conv2d(d0 + d0, d0, 3, padding=1)
         self.head = nn.Sequential(nn.Conv2d(d0, d0 // 2, 3, padding=1), nn.GELU(), nn.Conv2d(d0 // 2, 1, 1))
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.offset_head = nn.Sequential(
-            nn.Linear(d0, d0 // 2), nn.GELU(), nn.Linear(d0 // 2, 2)
+            nn.Linear(d0 * 2, d0 // 2), nn.GELU(), nn.Linear(d0 // 2, 2), nn.Tanh()
         )
-        self.visibility_head = nn.Linear(d0, 1)
+        self.visibility_head = nn.Linear(d0 * 2, 1)
         self.uncertainty_head = nn.Sequential(
-            nn.Linear(d0, d0 // 2), nn.GELU(), nn.Linear(d0 // 2, 1), nn.Softplus()
+            nn.Linear(d0 * 2, d0 // 2), nn.GELU(), nn.Linear(d0 // 2, 1)
         )
 
     def forward(self, x):
@@ -58,15 +57,25 @@ class TrackNetMotion(nn.Module):
         y = F.interpolate(y, size=x.shape[-2:], mode="bilinear", align_corners=False)
         y = self.up_full(torch.cat([y, f.reshape(b * t, f.shape[2], *f.shape[-2:])], dim=1))
         heat_logits = self.head(y).reshape(b, t, *x.shape[-2:]).squeeze(2)
-        pooled = self.global_pool(y).reshape(b, t, y.shape[1])
-        offsets = torch.sigmoid(self.offset_head(pooled))
+        height, width = heat_logits.shape[-2:]
+        spatial_weights = torch.softmax(heat_logits.flatten(2) * 10.0, dim=-1)
+        xs = torch.linspace(0, 1, width, device=x.device, dtype=heat_logits.dtype)
+        ys = torch.linspace(0, 1, height, device=x.device, dtype=heat_logits.dtype)
+        coarse_x = (spatial_weights.reshape(b, t, height, width) * xs).sum(dim=(-2, -1))
+        coarse_y = (spatial_weights.reshape(b, t, height, width) * ys[:, None]).sum(dim=(-2, -1))
+        coarse_centres = torch.stack((coarse_x, coarse_y), dim=-1)
+        frame_features = y.reshape(b, t, y.shape[1], height * width)
+        local_context = torch.matmul(
+            frame_features, spatial_weights.unsqueeze(-1)
+        ).squeeze(-1)
+        global_context = frame_features.mean(dim=-1)
+        pooled = torch.cat((local_context, global_context), dim=-1)
+        offsets = (coarse_centres + 0.1 * self.offset_head(pooled)).clamp(0.0, 1.0)
         visibility_logits = self.visibility_head(pooled).squeeze(-1)
-        uncertainty = self.uncertainty_head(pooled).squeeze(-1) + 1e-4
+        log_variance = self.uncertainty_head(pooled).squeeze(-1).clamp(-8.0, 4.0)
+        uncertainty = torch.exp(0.5 * log_variance)
         velocity = offsets[:, 1:] - offsets[:, :-1]
         acceleration = velocity[:, 1:] - velocity[:, :-1]
-        # Penalise uncertain peaks softly while retaining the heatmap's sharp
-        # spatial supervision.  The auxiliary heads are still exposed below.
-        heat_logits = heat_logits - 0.05 * uncertainty[..., None, None]
         heatmap = torch.sigmoid(heat_logits)
         if not self.return_aux:
             return heatmap
@@ -76,6 +85,7 @@ class TrackNetMotion(nn.Module):
             "offset": offsets,
             "visibility_logits": visibility_logits,
             "uncertainty": uncertainty,
+            "log_variance": log_variance,
             "velocity": velocity,
             "acceleration": acceleration,
         }
