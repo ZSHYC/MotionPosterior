@@ -10,6 +10,7 @@ from .pipeline import BallPoint  # 导入数据包定义
 from models_factory.builder import build_model
 from datasets_factory.transforms.tracknet_transforms import Resize, ConcatChannels
 from .windowing import iter_sliding_windows
+from .postprocess import decode_prediction
 
 # --- 1. “模型配置库” (已硬编码至 Detector 内部) ---
 MODEL_CONFIGS = {
@@ -122,10 +123,7 @@ class TrackNetDetector:
                     img_tensor = img_tensor.float().div(255).unsqueeze(0).to(self.device)
                     with torch.no_grad():
                         prediction = self.model(img_tensor)
-                        if isinstance(prediction, dict):
-                            prediction = prediction['heatmap']
-                        heatmap = prediction.squeeze(0)[output_position].cpu().numpy()
-                    point = self._heatmap_to_point(heatmap)
+                    point = self._prediction_to_point(prediction, output_position)
                     if point.is_detected:
                         point.x *= width / self.input_size[1]
                         point.y *= height / self.input_size[0]
@@ -156,17 +154,19 @@ class TrackNetDetector:
 
                 with torch.no_grad():
                     prediction = self.model(img_tensor)
-                    if isinstance(prediction, dict):
-                        prediction = prediction['heatmap']
-                    heatmap_preds = prediction.squeeze(0).cpu().numpy()
+                    heatmap_preds = (
+                        prediction['heatmap'].squeeze(0).detach().cpu().numpy()
+                        if isinstance(prediction, dict)
+                        else prediction.squeeze(0).cpu().numpy()
+                    )
                 if heatmap_preds.shape != (num_frames, *self.input_size):
                     raise ValueError(
                         f"Unexpected model output shape: {heatmap_preds.shape}, "
                         f"expected {(num_frames, *self.input_size)}"
                     )
 
-                for heatmap in heatmap_preds[:actual_frame_count]:
-                    point = self._heatmap_to_point(heatmap)
+                for output_position in range(actual_frame_count):
+                    point = self._prediction_to_point(prediction, output_position)
                     if point.is_detected:
                         point.x *= width / self.input_size[1]
                         point.y *= height / self.input_size[0]
@@ -211,3 +211,11 @@ class TrackNetDetector:
         conf = round(max_val / 255.0, 4)
 
         return BallPoint(x=cx, y=cy, conf=conf, is_detected=True)
+
+    def _prediction_to_point(self, prediction, frame_index: int) -> BallPoint:
+        """Decode rich motion outputs while retaining the legacy tensor path."""
+        decoded = decode_prediction(prediction, frame_index, threshold=self.threshold)
+        if decoded is None:
+            return BallPoint(is_detected=False)
+        x, y, conf = decoded
+        return BallPoint(x=x, y=y, conf=conf, is_detected=True)

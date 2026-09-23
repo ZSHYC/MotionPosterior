@@ -16,6 +16,7 @@ from datasets_factory.transforms.tracknet_transforms import (
     Resize, ConcatChannels
 )
 from core.windowing import iter_sliding_windows
+from core.postprocess import decode_heatmap, decode_prediction
 
 # --- 1. “模型配置库” ---
 MODEL_CONFIGS = {
@@ -102,34 +103,12 @@ def canonical_row(sample_id, video_name, frame_number, coords, fps, width, heigh
 
 # --- 2. 辅助函数 (✨ 已修改，与你的 Metric 脚本对齐) ---
 def _heatmap_to_coords(heatmap: np.ndarray, threshold: int = 127):
-    if heatmap.dtype != np.uint8:
-        heatmap = heatmap.astype(np.uint8)
-
-    _, binary_map = cv2.threshold(heatmap, threshold, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(binary_map, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    if contours:
-        largest_contour = max(contours, key=cv2.contourArea)
-        M = cv2.moments(largest_contour)
-        if M["m00"] > 0:
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-            
-            # --- ✨ 新增：提取置信度 ---
-            # 创建一个掩码，只关注最大轮廓内的区域
-            mask = np.zeros(heatmap.shape, dtype=np.uint8)
-            cv2.drawContours(mask, [largest_contour], -1, 255, -1)
-            
-            # 在原始热力图中找到该区域内的最大值
-            # minMaxLoc 会返回 (minVal, maxVal, minLoc, maxLoc)
-            _, max_val, _, _ = cv2.minMaxLoc(heatmap, mask=mask)
-            
-            # 将 0-255 归一化到 0-1 之间作为 conf
-            conf = round(max_val / 255.0, 4)
-            
-            return cx, cy, conf
-
-    return None
+    array = np.asarray(heatmap)
+    scale = 255.0 if array.dtype == np.uint8 or (array.size and float(np.nanmax(array)) > 1.5) else 1.0
+    decoded = decode_heatmap(array.astype(np.float32) / scale, threshold / 255.0 if scale > 1 else threshold)
+    if decoded is None:
+        return None
+    return int(decoded[0]), int(decoded[1]), round(decoded[2], 4)
 
 def draw_comet_tail(frame, points_deque, head_radius=8):
     """
@@ -261,8 +240,11 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
         with torch.no_grad():
             prediction = model(image_tensor)
             if isinstance(prediction, dict):
-                prediction = prediction['heatmap']
-            heatmaps_np = prediction.squeeze(0).cpu().numpy()
+                rich_prediction = prediction
+                heatmaps_np = prediction['heatmap'].squeeze(0).detach().cpu().numpy()
+            else:
+                rich_prediction = None
+                heatmaps_np = prediction.squeeze(0).cpu().numpy()
         if heatmaps_np.shape != (num_frames, INPUT_HEIGHT, INPUT_WIDTH):
             raise ValueError(
                 f"Unexpected model output shape: {heatmaps_np.shape}, "
@@ -273,7 +255,12 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
         for output_position, frame_number in output_positions:
             single_heatmap_np = heatmaps_np[output_position]
             heatmap_uint8 = (single_heatmap_np * 255).astype(np.uint8)
-            coords = _heatmap_to_coords(heatmap_uint8, threshold=threshold_uint8)
+            decoded = decode_prediction(
+                prediction, output_position, threshold=threshold,
+            ) if rich_prediction is not None else _heatmap_to_coords(
+                heatmap_uint8, threshold=threshold_uint8,
+            )
+            coords = decoded
             if coords is not None:
                 detected_frames_count += 1
                 trajectory_points.append(coords)
