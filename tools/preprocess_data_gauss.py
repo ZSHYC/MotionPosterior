@@ -203,6 +203,11 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
     # Split by clip, never by adjacent windows.  Random row splitting leaks
     # nearly identical neighbouring frames into validation.
     clip_ids = np.array(sorted(final_df['_clip_id'].unique()))
+    if len(clip_ids) < 2:
+        raise ValueError(
+            'Grouped train/validation split requires at least two clips; '
+            'add another clip instead of reporting a leaked or empty validation set.'
+        )
     rng = np.random.default_rng(42)
     rng.shuffle(clip_ids)
     if len(clip_ids) > 1:
@@ -210,10 +215,6 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
         train_ids = set(clip_ids[:num_train_clips])
         df_train = final_df[final_df['_clip_id'].isin(train_ids)]
         df_val = final_df[~final_df['_clip_id'].isin(train_ids)]
-    else:
-        # A single clip cannot provide an honest group holdout; keep it in
-        # train and emit an empty validation CSV instead of leaking windows.
-        df_train, df_val = final_df, final_df.iloc[0:0]
     df_train = df_train.drop(columns=['_clip_id']).reset_index(drop=True)
     df_val = df_val.drop(columns=['_clip_id']).reset_index(drop=True)
 
