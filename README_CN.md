@@ -150,7 +150,8 @@ benchmark_id,video_name,frame_number,detected,x_512,y_288,x_orig,y_orig,conf,fps
 * 输入 `[B, 9, H, W]`（三帧）或 `[B, 15, H, W]`（五帧）；
 * 输出与输入帧数相同的全分辨率热力图；
 * ConvNeXt V2 思路的分层骨干（GELU、GRN、深度卷积残差块）；
-* 在 1/4、1/8 尺度执行带有效边界掩码的局部跨帧特征相关，并用 motion residual gate 调制特征；
+* 在 1/2、1/4、1/8 尺度先做可学习全局平移补偿，再执行 3×3 局部跨帧相关和密集 offset 精修；
+* 运动模型额外预测中心 offset、visibility、uncertainty，并用速度/加速度一致性损失训练；
 * 保留高分辨率分支，避免高速小球在深层下采样中消失。
 
 五帧训练与推理：
@@ -162,6 +163,12 @@ python train.py  # 选择 configs/tracknetmotion_convnext_5frames.py
 python track.py <input_dir> <weights_path> --arch motion5 \
   --output-dir <trajectory_csv_dir> --threshold 0.5 --device cuda:0
 ```
+
+若要训练严格在线版本，将预处理参数改为 `--window-type causal`，并选择
+`configs/tracknetmotion_convnext_5frames_causal.py`；该版本输入为
+`[t-4,t-3,t-2,t-1,t]`，不会读未来帧。
+
+`motion3/motion5` 默认使用 `chunk`，每个窗口输入/输出帧数一致；需要中心滑动或实时因果评估时分别使用 `--window-mode center` / `--window-mode causal`。训练保存完整 checkpoint（模型、优化器、调度器和进度），配置 `resume_from` 可续训。
 
 完整设计取舍、边界条件与顶会文献链接见 [`docs/模型升级方案.md`](docs/模型升级方案.md)。
 

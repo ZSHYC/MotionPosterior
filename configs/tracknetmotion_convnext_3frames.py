@@ -12,6 +12,7 @@ target_keys = ['gt_path_prev', 'gt_path', 'gt_path_next']
 model = dict(
     type='TrackNetMotion',
     num_frames=num_frames,
+    return_aux=True,
     backbone=dict(type='MotionConvNeXtBackbone', num_frames=num_frames),
 )
 
@@ -34,7 +35,8 @@ data = dict(
              input_height=input_size[0], input_width=input_size[1], pipeline=pipeline),
 )
 
-loss = dict(type='TrackNetV2Loss')
+loss = dict(type='TrackNetV2Loss', aux_weight=0.25, offset_weight=0.2,
+            visibility_weight=0.1, uncertainty_weight=0.05, trajectory_weight=0.05)
 optimizer = dict(type='AdamW', lr=1e-4)
 optimizer_config = dict(grad_clip=dict(max_norm=1.0))
 lr_config = dict(policy='Step', step=[20, 25], gamma=0.1)

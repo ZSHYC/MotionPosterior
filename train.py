@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader
 import importlib.util
 from pathlib import Path
 import sys # 确保导入 sys
+import random
+import numpy as np
  
 #torch.autograd.set_detect_anomaly(True)
 
@@ -57,6 +59,13 @@ def run_experiment(config_path_str: str):
         # 不再硬编码，而是使用传入的参数
         cfg = load_config_from_path(config_path_str)
         print("✅ Configuration loaded successfully.")
+        seed = getattr(cfg, 'seed', None)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
         
         # --- B. 环境设置 (由 Runner 内部处理或在这里设置) ---
         # (保持不变)
@@ -80,7 +89,7 @@ def run_experiment(config_path_str: str):
             num_workers=cfg.data['workers_per_gpu'],
             shuffle=True,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=cfg.data['workers_per_gpu'] > 0
         )
         val_loader = DataLoader(
             dataset=val_dataset,
@@ -88,7 +97,7 @@ def run_experiment(config_path_str: str):
             num_workers=cfg.data['workers_per_gpu'],
             shuffle=False,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=cfg.data['workers_per_gpu'] > 0
         )
         print("✅ DataLoaders built successfully.")
 

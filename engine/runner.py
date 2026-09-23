@@ -43,6 +43,34 @@ class Runner:
 
         self.outputs = {}      # 用于在钩子之间传递临时数据 (如loss, metrics)
         self.best_metric = 0.0 # 用于保存最佳模型的判断依据
+        self.start_epoch = 0
+        resume_from = getattr(cfg, 'resume_from', None)
+        if resume_from:
+            self._load_checkpoint(resume_from)
+
+    def _checkpoint(self):
+        return {
+            'model': self.model.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'scheduler': self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
+            'epoch': self.epoch,
+            'global_iter': self.global_iter,
+            'best_metric': self.best_metric,
+        }
+
+    def _load_checkpoint(self, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        state_dict = checkpoint.get('model', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+        self.model.load_state_dict(state_dict)
+        if isinstance(checkpoint, dict):
+            if checkpoint.get('optimizer'):
+                self.optimizer.load_state_dict(checkpoint['optimizer'])
+            if self.lr_scheduler is not None and checkpoint.get('scheduler'):
+                self.lr_scheduler.load_state_dict(checkpoint['scheduler'])
+            self.start_epoch = int(checkpoint.get('epoch', -1)) + 1
+            self.global_iter = int(checkpoint.get('global_iter', 0))
+            self.best_metric = float(checkpoint.get('best_metric', 0.0))
+        print(f"✅ Resumed checkpoint from {checkpoint_path} at epoch {self.start_epoch}")
 
     def call_hooks(self, event_name):
         """调用所有钩子中名为 event_name 的方法。"""
@@ -69,7 +97,7 @@ class Runner:
             
             self.optimizer.zero_grad()
             logits = self.model(inputs)
-            loss = self.criterion(logits, targets, epoch_num=self.epoch+1)
+            loss = self.criterion(logits, targets, batch=data_batch, epoch_num=self.epoch+1)
             loss.backward()
 
             # ✨✨✨ 【【【 紧急添加：手动 Warmup 逻辑 】】】 ✨✨✨
@@ -84,7 +112,7 @@ class Runner:
                 warmup_ratio = self.cfg.lr_config.get('warmup_ratio', 1e-6) # 初始 LR 比例
                 
                 # 3. 检查当前是否处于 Warmup 阶段
-                if self.global_iter < warmup_iters:
+                if warmup_iters > 0 and self.global_iter < warmup_iters:
                     # 4. 计算当前的 Warmup 学习率
                     #    k 是一个从 warmup_ratio 线性增长到 1.0 的因子
                     k = (1 - warmup_ratio) * self.global_iter / warmup_iters + warmup_ratio
@@ -153,7 +181,7 @@ class Runner:
             self.outputs['val_logits'] = logits
 
             # 计算损失和指标
-            loss = self.criterion(logits, targets)
+            loss = self.criterion(logits, targets, batch=data_batch)
             val_losses.append(loss.item())
             self.metric.update(logits, data_batch) # metric传入的是logits和对应的batch，算出是tp还是啥别的
             
@@ -163,7 +191,7 @@ class Runner:
 
         # 计算并打印最终结果
         eval_results = self.metric.compute() # 这里才算出来F1
-        eval_results['loss'] = np.mean(val_losses)
+        eval_results['loss'] = np.mean(val_losses) if val_losses else float('nan')
         self.outputs['val_metrics'] = eval_results 
         print(f"Validation Results: {eval_results}")
         
@@ -175,7 +203,7 @@ class Runner:
         print("🚀 Starting Runner...")
         self.call_hooks('before_run')
         
-        for self.epoch in range(self.max_epochs):
+        for self.epoch in range(self.start_epoch, self.max_epochs):
             self.call_hooks('before_epoch')
             self.train_epoch()
             
@@ -186,7 +214,7 @@ class Runner:
                 # 1. 每次验证后，都保存当前 epoch 的模型快照
                 # 使用 f-string 创建一个独一无二的文件名，如 'epoch_5.pth'
                 checkpoint_path = self.work_dir / f'epoch_{self.epoch + 1}.pth'
-                torch.save(self.model.state_dict(), checkpoint_path)
+                torch.save(self._checkpoint(), checkpoint_path)
                 print(f"✅ Checkpoint saved for epoch {self.epoch + 1} to {checkpoint_path}")
                 # --- 新增代码 END ---
 
@@ -195,7 +223,7 @@ class Runner:
                 if current_f1 > self.best_metric:
                     self.best_metric = current_f1
                     best_model_path = self.work_dir / 'best_model.pth'
-                    torch.save(self.model.state_dict(), best_model_path)
+                    torch.save(self._checkpoint(), best_model_path)
                     print(f"🏆 New best model saved to {best_model_path} with F1-score: {self.best_metric:.4f}")
             
             # 只有在学习率调度器存在时，才执行 .step()
@@ -224,7 +252,9 @@ class Runner:
         # 1. 加载指定的权重 (如果是从 test.py 启动)
         if checkpoint_path is not None:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint)
+            self.model.load_state_dict(
+                checkpoint.get('model', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+            )
             print(f"✅ Loaded checkpoint from {checkpoint_path}")
 
         self.model.eval()
@@ -251,7 +281,7 @@ class Runner:
             self.outputs['test_logits'] = logits
 
             # 计算
-            loss = self.criterion(logits, targets)
+            loss = self.criterion(logits, targets, batch=data_batch)
             test_losses.append(loss.item())
             self.metric.update(logits, data_batch)
             
@@ -260,7 +290,7 @@ class Runner:
 
         # 4. 汇总结果
         eval_results = self.metric.compute()
-        eval_results['loss'] = np.mean(test_losses)
+        eval_results['loss'] = np.mean(test_losses) if test_losses else float('nan')
         self.outputs['test_metrics'] = eval_results
         
         print(f"\n" + "="*30)

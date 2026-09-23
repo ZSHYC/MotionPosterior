@@ -9,6 +9,7 @@ from .pipeline import BallPoint  # 导入数据包定义
 # 导入项目内的构建组件
 from models_factory.builder import build_model
 from datasets_factory.transforms.tracknet_transforms import Resize, ConcatChannels
+from .windowing import iter_sliding_windows
 
 # --- 1. “模型配置库” (已硬编码至 Detector 内部) ---
 MODEL_CONFIGS = {
@@ -40,10 +41,14 @@ MODEL_CONFIGS = {
         num_frames=5,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
     ),
+    'motion5_causal': dict(
+        type='TrackNetMotion', num_frames=5,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
+    ),
 }
 
 class TrackNetDetector:
-    def __init__(self, arch, weights_path, device='cuda:0', threshold=0.5):
+    def __init__(self, arch, weights_path, device='cuda:0', threshold=0.5, window_mode=None):
         """
         Stage 1: 检测器
         :param arch: 架构版本 ('v2', 'v5', 'motion3', 'motion5')
@@ -52,6 +57,7 @@ class TrackNetDetector:
         :param threshold: 热力图激活阈值
         """
         self.threshold = float(threshold)
+        self.window_mode = window_mode or ('causal' if arch == 'motion5_causal' else 'chunk')
         if not math.isfinite(self.threshold) or not 0 <= self.threshold < 1:
             raise ValueError(f"threshold must be a finite value in [0, 1), got {threshold}")
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -67,7 +73,10 @@ class TrackNetDetector:
         self.num_frames = int(getattr(self.model, 'num_frames', model_cfg.get('num_frames', 3)))
         if self.num_frames not in (3, 5):
             raise ValueError(f'num_frames must be 3 or 5, got {self.num_frames}')
-        self.model.load_state_dict(torch.load(weights_path, map_location='cpu'))
+        checkpoint = torch.load(weights_path, map_location='cpu')
+        self.model.load_state_dict(
+            checkpoint.get('model', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+        )
         self.model.to(self.device).eval()
         print(f"✅ Detector initialized with [{arch.upper()}] model on {self.device}")
 
@@ -99,6 +108,31 @@ class TrackNetDetector:
         pbar = tqdm(total=total_frames or None, desc="[Stage 1] Neural Inference")
 
         try:
+            window_mode = getattr(self, 'window_mode', 'chunk')
+            if window_mode in ('center', 'causal'):
+                for frames, output_position, frame_number in iter_sliding_windows(
+                    cap, num_frames, window_mode
+                ):
+                    batch_data = {
+                        key: cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        for key, frame in zip(frame_keys, frames)
+                    }
+                    batch_data = self.concator(self.resizer(batch_data))
+                    img_tensor = torch.from_numpy(batch_data['img'].transpose(2, 0, 1))
+                    img_tensor = img_tensor.float().div(255).unsqueeze(0).to(self.device)
+                    with torch.no_grad():
+                        prediction = self.model(img_tensor)
+                        if isinstance(prediction, dict):
+                            prediction = prediction['heatmap']
+                        heatmap = prediction.squeeze(0)[output_position].cpu().numpy()
+                    point = self._heatmap_to_point(heatmap)
+                    if point.is_detected:
+                        point.x *= width / self.input_size[1]
+                        point.y *= height / self.input_size[0]
+                    raw_points.append(point)
+                    pbar.update(1)
+                return raw_points
+
             while cap.isOpened():
                 frames = []
                 for _ in range(num_frames):
@@ -121,7 +155,10 @@ class TrackNetDetector:
                 img_tensor = img_tensor.float().div(255).unsqueeze(0).to(self.device)
 
                 with torch.no_grad():
-                    heatmap_preds = self.model(img_tensor).squeeze(0).cpu().numpy()
+                    prediction = self.model(img_tensor)
+                    if isinstance(prediction, dict):
+                        prediction = prediction['heatmap']
+                    heatmap_preds = prediction.squeeze(0).cpu().numpy()
                 if heatmap_preds.shape != (num_frames, *self.input_size):
                     raise ValueError(
                         f"Unexpected model output shape: {heatmap_preds.shape}, "

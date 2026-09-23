@@ -1,4 +1,11 @@
-"""A compact ConvNeXt-style encoder with local cross-frame motion fusion."""
+"""ConvNeXt encoder with global registration and local motion correlation.
+
+The motion block is deliberately self contained: it estimates a bounded global
+translation, searches a 3x3 spatial neighbourhood on the compensated feature,
+and predicts a dense residual offset for a final refinement.  This follows the
+same short-term alignment idea used by modern video small-object detectors,
+without requiring an external optical-flow model.
+"""
 
 import torch
 import torch.nn as nn
@@ -41,47 +48,126 @@ class _ConvNeXtBlock(nn.Module):
         return residual + x.permute(0, 3, 1, 2)
 
 
-class _LocalMotionFusion(nn.Module):
-    """Feature correlation over nearby time offsets, with a residual motion gate."""
+class _SpatialTemporalMotionFusion(nn.Module):
+    """Register neighbouring frames and aggregate local spatio-temporal evidence."""
 
-    def __init__(self, channels, radius):
+    def __init__(self, channels, radius, correlation_channels=32, max_global_shift=0.15):
         super().__init__()
         self.radius = radius
-        self.query = nn.Conv2d(channels, channels, 1, bias=False)
-        self.key = nn.Conv2d(channels, channels, 1, bias=False)
+        self.correlation_channels = min(correlation_channels, channels)
+        self.max_global_shift = max_global_shift
+        self.query = nn.Conv2d(channels, self.correlation_channels, 1, bias=False)
+        self.key = nn.Conv2d(channels, self.correlation_channels, 1, bias=False)
         self.value = nn.Conv2d(channels, channels, 1, bias=False)
+        hidden = max(16, channels // 4)
+        self.global_shift = nn.Sequential(
+            nn.Linear(channels * 3, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 2),
+            nn.Tanh(),
+        )
+        self.offset = nn.Sequential(
+            nn.Conv2d(channels * 3, hidden, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden, 2, 3, padding=1),
+            nn.Tanh(),
+        )
         self.gate = nn.Sequential(
-            nn.Conv2d(channels, channels, 3, padding=1, groups=channels, bias=False),
+            nn.Conv2d(channels * 2, channels, 3, padding=1, groups=channels, bias=False),
             nn.Conv2d(channels, channels, 1),
             nn.Sigmoid(),
         )
         self.temperature = nn.Parameter(torch.tensor(1.0))
+        self.motion_scale = nn.Parameter(torch.tensor(0.0))
+        nn.init.zeros_(self.global_shift[2].weight)
+        nn.init.zeros_(self.global_shift[2].bias)
+        nn.init.zeros_(self.offset[2].weight)
+        nn.init.zeros_(self.offset[2].bias)
+
+    @staticmethod
+    def _grid(height, width, device, dtype):
+        y, x = torch.meshgrid(
+            torch.linspace(-1.0, 1.0, height, device=device, dtype=dtype),
+            torch.linspace(-1.0, 1.0, width, device=device, dtype=dtype),
+            indexing="ij",
+        )
+        return torch.stack((x, y), dim=-1).unsqueeze(0)
 
     def forward(self, x):
-        # x is [B, T, C, H, W]. Invalid temporal neighbors are masked, not wrapped.
+        # x is [B, T, C, H, W]. Invalid temporal neighbours are masked, not wrapped.
         b, t, c, h, w = x.shape
-        q = self.query(x.reshape(b * t, c, h, w)).reshape(b, t, c, h, w)
-        k = self.key(x.reshape(b * t, c, h, w)).reshape(b, t, c, h, w)
-        v = self.value(x.reshape(b * t, c, h, w)).reshape(b, t, c, h, w)
-        # Cosine-style local correlation keeps the attention scale stable as
-        # feature norms change across training stages.
-        q = F.normalize(q, dim=2)
-        k = F.normalize(k, dim=2)
-        neighbors, valid = [], []
+        x_flat = x.reshape(b * t, c, h, w)
+        q = F.normalize(self.query(x_flat), dim=1)
+        base_grid = self._grid(h, w, x.device, x.dtype)
+        temporal_candidates, temporal_scores, valid = [], [], []
+        center_desc = x.mean(dim=(-1, -2))
         for offset in range(-self.radius, self.radius + 1):
-            indices = [min(max(i + offset, 0), t - 1) for i in range(t)]
-            neighbors.append(k[:, indices])
+            if offset == 0:
+                continue
+            indices = torch.tensor(
+                [min(max(i + offset, 0), t - 1) for i in range(t)],
+                device=x.device,
+                dtype=torch.long,
+            )
+            neighbour = x[:, indices]
+            neighbour_desc = neighbour.mean(dim=(-1, -2))
+            pair_desc = torch.cat(
+                (center_desc, neighbour_desc, (center_desc - neighbour_desc).abs()), dim=-1
+            )
+            shift = self.global_shift(pair_desc.reshape(b * t, -1))
+            shift = shift * self.max_global_shift
+            grid = base_grid.expand(b * t, -1, -1, -1) + shift[:, None, None, :]
+            warped = F.grid_sample(
+                neighbour.reshape(b * t, c, h, w), grid,
+                mode="bilinear", padding_mode="border", align_corners=True,
+            )
+            key = F.normalize(self.key(warped), dim=1)
+            value = self.value(warped)
+
+            # Nine score maps are much smaller than unfolding full value maps,
+            # especially at half resolution for five frames.
+            padded_key = F.pad(key, (1, 1, 1, 1))
+            displacements = [(dx, dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
+            local_scores = torch.stack([
+                (q * padded_key[:, :, 1 + dy:1 + dy + h, 1 + dx:1 + dx + w]).sum(dim=1)
+                for dx, dy in displacements
+            ], dim=1)
+            local_weights = torch.softmax(
+                local_scores / self.temperature.clamp_min(0.1), dim=1
+            )
+            dx = sum(local_weights[:, i] * disp[0] for i, disp in enumerate(displacements))
+            dy = sum(local_weights[:, i] * disp[1] for i, disp in enumerate(displacements))
+            local_grid = base_grid.expand(b * t, -1, -1, -1) + torch.stack(
+                (dx * (2.0 / max(w - 1, 1)), dy * (2.0 / max(h - 1, 1))), dim=-1
+            )
+            local_aligned = F.grid_sample(
+                value, local_grid, mode="bilinear", padding_mode="border", align_corners=True
+            )
+            temporal_candidates.append(local_aligned)
+            temporal_scores.append((q * F.normalize(self.key(local_aligned), dim=1)).mean(dim=1))
             valid.append([0 if i + offset < 0 or i + offset >= t else 1 for i in range(t)])
-        keys = torch.stack(neighbors, dim=2)  # [B,T,K,C,H,W]
-        values = torch.stack([v[:, [min(max(i + o, 0), t - 1) for i in range(t)]]
-                              for o in range(-self.radius, self.radius + 1)], dim=2)
-        scores = (q.unsqueeze(2) * keys).mean(dim=3) / self.temperature.clamp_min(0.1)
-        mask = torch.tensor(valid, device=x.device, dtype=torch.bool).t()[None, :, :, None, None]
+
+        candidates = torch.stack(temporal_candidates, dim=1)  # [BT,K,C,H,W]
+        scores = torch.stack(temporal_scores, dim=1)  # [BT,K,H,W]
+        mask = torch.tensor(valid, device=x.device, dtype=torch.bool).t().reshape(1, t, -1, 1, 1)
+        mask = mask.expand(b, -1, -1, -1, -1).reshape(b * t, -1, 1, 1)
         scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
-        weights = torch.softmax(scores, dim=2).unsqueeze(3)
-        aligned = (weights * values).sum(dim=2)
-        motion = (x - aligned).abs()
-        return x + self.gate(motion.reshape(b * t, c, h, w)).reshape(b, t, c, h, w) * aligned
+        temporal_weights = torch.softmax(scores, dim=1).unsqueeze(2)
+        aligned = (temporal_weights * candidates).sum(dim=1)
+
+        # Dense residual offset acts as a lightweight deformable alignment step.
+        motion = x_flat - aligned
+        residual_offset = self.offset(torch.cat((x_flat, aligned, motion), dim=1)) * 0.15
+        refined_grid = base_grid.expand(b * t, -1, -1, -1) + residual_offset.permute(0, 2, 3, 1)
+        aligned = F.grid_sample(
+            aligned, refined_grid, mode="bilinear", padding_mode="border", align_corners=True
+        )
+        gate = self.gate(torch.cat((x_flat, motion), dim=1))
+        return (x_flat + self.motion_scale * gate * aligned).reshape(b, t, c, h, w)
+
+
+# Keep the old private name available for code importing it from early versions.
+_LocalMotionFusion = _SpatialTemporalMotionFusion
 
 
 @BACKBONES.register_module
@@ -99,10 +185,11 @@ class MotionConvNeXtBackbone(nn.Module):
         self.stage1 = nn.Sequential(*[_ConvNeXtBlock(dims[0]) for _ in range(depths[0])])
         self.down2 = nn.Sequential(nn.GroupNorm(1, dims[0]), nn.Conv2d(dims[0], dims[1], 2, stride=2))
         self.stage2 = nn.Sequential(*[_ConvNeXtBlock(dims[1]) for _ in range(depths[1])])
-        self.motion_quarter = _LocalMotionFusion(dims[1], radius=2)
+        self.motion_half = _SpatialTemporalMotionFusion(dims[0], radius=1, correlation_channels=8)
+        self.motion_quarter = _SpatialTemporalMotionFusion(dims[1], radius=2, correlation_channels=16)
         self.down3 = nn.Sequential(nn.GroupNorm(1, dims[1]), nn.Conv2d(dims[1], dims[2], 2, stride=2))
         self.stage3 = nn.Sequential(*[_ConvNeXtBlock(dims[2]) for _ in range(depths[2])])
-        self.motion_eighth = _LocalMotionFusion(dims[2], radius=4)
+        self.motion_eighth = _SpatialTemporalMotionFusion(dims[2], radius=4, correlation_channels=24)
 
     def forward(self, x):
         if x.ndim != 4 or x.shape[1] != self.num_frames * 3:
@@ -114,6 +201,7 @@ class MotionConvNeXtBackbone(nn.Module):
         y = self.stem(x.reshape(b * self.num_frames, 3, h, w))
         h2, w2 = y.shape[-2:]
         y = self.stage1(y).reshape(b, self.num_frames, self.dims[0], h2, w2)
+        y = self.motion_half(y)
         half = y
         y = self.down2(y.reshape(b * self.num_frames, self.dims[0], h2, w2))
         h4, w4 = y.shape[-2:]

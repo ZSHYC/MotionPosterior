@@ -47,16 +47,19 @@ class TennisDataset(Dataset):
         }
 
         # CSV 顺序是模型输入的时序契约；显式列出可用帧，避免字典/字母序改变它。
-        frame_order = ('prev2', 'prev', 'current', 'next', 'next2') if 'path_prev2' in row_info else ('prev', 'current', 'next')
+        if 'path_prev4' in row_info:
+            frame_order = ('prev4', 'prev3', 'prev2', 'prev', 'current')
+        elif 'path_prev2' in row_info:
+            frame_order = ('prev2', 'prev', 'current', 'next', 'next2')
+        else:
+            frame_order = ('prev', 'current', 'next')
         x_fields_sorted = [
-            'x-coordinate' if label == 'current' else f'x_{label}'
-            for label in frame_order
-            if ('x-coordinate' if label == 'current' else f'x_{label}') in row_info
+            ('x_current' if 'x_current' in row_info else 'x-coordinate')
+            if label == 'current' else f'x_{label}' for label in frame_order
         ]
         y_fields_sorted = [
-            'y-coordinate' if label == 'current' else f'y_{label}'
-            for label in frame_order
-            if ('y-coordinate' if label == 'current' else f'y_{label}') in row_info
+            ('y_current' if 'y_current' in row_info else 'y-coordinate')
+            if label == 'current' else f'y_{label}' for label in frame_order
         ]
 
         # 构建坐标列表
@@ -69,9 +72,8 @@ class TennisDataset(Dataset):
             results['coords'] = coords_list
 
         vis_fields_sorted = [
-            'visibility' if label == 'current' else f'visibility_{label}'
-            for label in frame_order
-            if ('visibility' if label == 'current' else f'visibility_{label}') in row_info
+            ('visibility_current' if 'visibility_current' in row_info else 'visibility')
+            if label == 'current' else f'visibility_{label}' for label in frame_order
         ]
 
         # 构建可见性列表

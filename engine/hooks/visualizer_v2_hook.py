@@ -48,7 +48,9 @@ class ValidationVisualizerV2Hook(BaseHook):
         target_tensor = batch['target'].cpu()
         coords_gt_batch = batch['coords']
         # print(logits.shape)
-        pred_tensor = logits.cpu() * 255
+        if isinstance(logits, dict):
+            logits = logits['heatmap']
+        pred_tensor = logits.detach().cpu() * 255
 
         for i in range(input_tensor.size(0)):
             if self.vis_count >= self.num_samples_to_save:

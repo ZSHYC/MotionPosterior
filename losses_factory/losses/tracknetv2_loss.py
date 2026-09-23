@@ -1,109 +1,93 @@
+"""Numerically stable heatmap and trajectory losses used by TrackNet models."""
+
 import torch
 import torch.nn as nn
-from numpy.f2py.auxfuncs import throw_error
-from numpy.ma.core import argmax
+import torch.nn.functional as F
 
 from ..builder import LOSSES
 
 
 @LOSSES.register_module
 class TrackNetV2Loss(nn.Module):
+    """Soft focal BCE with optional centre/visibility/uncertainty supervision.
+
+    The model may pass either a probability tensor or the richer dictionary
+    returned by ``TrackNetMotion(return_aux=True)``. Targets remain the
+    project's 0..255 heatmaps, but their Gaussian values are preserved instead
+    of being collapsed to a binary disk.
     """
-        一个实现了您提供的 "WBCE" (变种 Focal Loss, 伽马=2) 的 nn.Module。
 
-        它接收 Logits (模型的原始输出，未经过 Sigmoid 激活) 以保证数值稳定性。
-
-        公式: -sum [ (1-P)^2 * Y * log(P) + P^2 * (1-Y) * log(1-P) ]
-        其中 P = sigmoid(logits)
-    """
-
-    def __init__(self, reduction="mean"):
+    def __init__(self, reduction="mean", aux_weight=0.25, offset_weight=0.2,
+                 visibility_weight=0.1, uncertainty_weight=0.05,
+                 trajectory_weight=0.05):
         super().__init__()
         self.reduction = reduction
+        self.aux_weight = aux_weight
+        self.offset_weight = offset_weight
+        self.visibility_weight = visibility_weight
+        self.uncertainty_weight = uncertainty_weight
+        self.trajectory_weight = trajectory_weight
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor, **kwargs) -> torch.Tensor:
-        """
-           计算损失值。
+    def _heatmap_loss(self, logits, targets):
+        y = targets.float().div(255.0).clamp(0.0, 1.0)
+        prob = torch.sigmoid(logits)
+        focal_weight = y * (1.0 - prob).pow(2) + (1.0 - y) * prob.pow(2)
+        loss = F.binary_cross_entropy_with_logits(logits, y, reduction="none") * focal_weight
+        if self.reduction == "sum":
+            return loss.sum()
+        if self.reduction == "none":
+            return loss
+        return loss.mean()
 
-           参数:
-               logits (torch.Tensor):
-                   来自模型头部的原始输出。
-                   期望形状: [B, 3, H, W]
+    @staticmethod
+    def _target_centres(targets):
+        mass = targets.float().div(255.0).clamp_min(0.0)
+        b, t, h, w = mass.shape
+        ys = torch.linspace(0.0, 1.0, h, device=mass.device, dtype=mass.dtype)
+        xs = torch.linspace(0.0, 1.0, w, device=mass.device, dtype=mass.dtype)
+        norm = mass.sum(dim=(-1, -2))
+        visible = norm > 1e-5
+        x = (mass * xs.view(1, 1, 1, w)).sum(dim=(-1, -2)) / norm.clamp_min(1e-5)
+        y = (mass * ys.view(1, 1, h, 1)).sum(dim=(-1, -2)) / norm.clamp_min(1e-5)
+        return torch.stack((x, y), dim=-1), visible
 
-               targets (torch.Tensor):
-                   真实的灰度标签图 (Ground Truth Grayscale Map)。
-                   期望形状: [B, 3, H, W]，其中每个像素的值是0或255
-                   期望数据类型: torch.long (int64)。
-
-           返回:
-               torch.Tensor: 计算出的交叉熵损失值，一个标量张量。
-       """
-
-        # 1. 将 Logits 转换维度
-        # prob:
-        prob = logits
-
-        # 2. 将targets的Gt图灰度值大于0的都设为正样本
-        y = torch.where(targets == 255, 1.0, 0.0)
-
-        # 3. 计算权重（基于预测概率）
-        # 对于正样本：权重 = (1 - prob)^2
-        # 对于负样本：权重 = prob^2
-        pos_weight = (1.0 - prob).pow(2)
-        neg_weight = prob.pow(2)
-
-        # 4. 计算标准 BCE 损失的 Log 部分
-        eps = 1e-6
-        # prob 限制在[eps，1-eps]
-        prob = torch.clamp(prob, eps, 1.0 - eps)
-        weight_bce_loss = -(
-                pos_weight * y * torch.log(prob + eps) +
-                neg_weight * (1.0 - y) * torch.log((1.0 - prob + eps))
-        )
-
-        # 5. 检查是否有NaN值
-        if torch.isnan(weight_bce_loss).any():
-            print("警告: 损失中出现NaN值!")
-            print(f"logits范围: [{logits.min():.6f}, {logits.max():.6f}]")
-            print(f"prob范围: [{prob.min():.6f}, {prob.max():.6f}]")
-            print(f"y中正样本数量: {(y == 1).sum().item()}")
-            print(f"y中负样本数量: {(y == 0).sum().item()}")
-
-        # 3. 聚合损失
-        if self.reduction == 'mean':
-            return weight_bce_loss.mean()
-        elif self.reduction == 'sum':
-            return weight_bce_loss.sum()
+    def forward(self, prediction, targets: torch.Tensor, **kwargs) -> torch.Tensor:
+        if isinstance(prediction, dict):
+            logits = prediction.get("heat_logits")
+            if logits is None:
+                logits = torch.logit(prediction["heatmap"].clamp(1e-5, 1 - 1e-5))
         else:
-            return weight_bce_loss  # 返回逐元素的损失
+            probs = prediction.clamp(1e-5, 1 - 1e-5)
+            logits = torch.logit(probs)
 
+        heat_loss = self._heatmap_loss(logits, targets)
+        if not isinstance(prediction, dict) or "offset" not in prediction:
+            return heat_loss
 
-# ==================== 测试代码 ====================
-if __name__ == "__main__":
-    print("--- 测试 TrackNetV1Loss (基于256灰度等级分类原理) ---")
-
-    # 定义模拟参数
-    B, C, H, W = 4, 3, 640, 360  # 批大小=4, 类别/灰度等级=256, 尺寸=64x64
-
-    # 1. 初始化损失函数
-    loss_fn = TrackNetV2Loss()
-    print("损失函数已初始化")
-
-    # 2. 创建模拟输入
-    # 模型的输出 logits, 形状 [B, 1, H, W]
-    mock_logits = torch.randn(B, C, H, W)
-    # 真实的灰度标签图, 形状 [B, H, W], 值为 0 到 255
-    mock_targets = torch.randint(0, 255, (B, 3, H, W), dtype=torch.long)
-
-    print(f"\n模拟 Logits 形状: {mock_logits.shape}")
-    print(f"模拟 Targets 形状: {mock_targets.shape}")
-    print(f"Targets 数据类型: {mock_targets.dtype}")
-
-    # 3. 计算损失
-    try:
-        loss_value = loss_fn(torch.sigmoid(mock_logits), mock_targets)
-        print(f"\n计算得到的损失值: {loss_value.item():.4f}")
-        print(f"损失值是一个标量: {loss_value.dim() == 0}")
-        print("\n✅ 测试通过：损失函数成功处理了符合原理的输入维度。")
-    except Exception as e:
-        print(f"\n❌ 测试失败. 错误: {e}")
+        centres, visible = self._target_centres(targets)
+        offsets = prediction["offset"]
+        visibility_logits = prediction.get("visibility_logits")
+        uncertainty = prediction.get("uncertainty")
+        aux = logits.new_zeros(())
+        if offsets is not None:
+            offset_error = F.smooth_l1_loss(offsets, centres, reduction="none").mean(dim=-1)
+            aux = aux + self.offset_weight * (offset_error * visible.float()).sum() / visible.float().sum().clamp_min(1.0)
+        if visibility_logits is not None:
+            aux = aux + self.visibility_weight * F.binary_cross_entropy_with_logits(
+                visibility_logits, visible.float()
+            )
+        if uncertainty is not None and offsets is not None:
+            squared_error = (offsets - centres).pow(2).sum(dim=-1).detach()
+            heteroscedastic = torch.exp(-uncertainty).clamp_max(20.0) * squared_error + uncertainty
+            aux = aux + self.uncertainty_weight * heteroscedastic.mean()
+        if offsets is not None and offsets.shape[1] > 1:
+            velocity = offsets[:, 1:] - offsets[:, :-1]
+            target_velocity = centres[:, 1:] - centres[:, :-1]
+            aux = aux + self.trajectory_weight * F.smooth_l1_loss(velocity, target_velocity)
+            if offsets.shape[1] > 2:
+                acceleration = velocity[:, 1:] - velocity[:, :-1]
+                target_acceleration = target_velocity[:, 1:] - target_velocity[:, :-1]
+                aux = aux + 0.5 * self.trajectory_weight * F.smooth_l1_loss(
+                    acceleration, target_acceleration
+                )
+        return heat_loss + self.aux_weight * aux

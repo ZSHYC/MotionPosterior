@@ -160,12 +160,20 @@ python track.py <input_dir> <weights_path> --arch motion5 \
   --output-dir <trajectory_csv_dir> --threshold 0.5 --device cuda:0
 ```
 
+For an online five-frame model, preprocess with `--window-type causal` and use
+`configs/tracknetmotion_convnext_5frames_causal.py`; its input is
+`[t-4,t-3,t-2,t-1,t]` and never includes future frames.
+
+`motion3` and `motion5` default to `chunk`, preserving equal T-frame input/output
+windows. Use `--window-mode center` for centered sliding evaluation or
+`--window-mode causal` for online inference. Training checkpoints include model,
+optimizer, scheduler, and progress state; set `resume_from` to continue.
+
 The new backbone is a ConvNeXt V2-inspired hierarchical encoder with GRN,
-full/half/quarter/eighth-resolution features, and local feature correlation at the
-quarter and eighth scales. The correlation uses valid temporal neighbors and a
-motion residual gate; it does not require an optical-flow dependency. The quarter
-scale is intentionally retained because aggressive downsampling can erase a fast,
-small ball. See [`docs/模型升级方案.md`](docs/模型升级方案.md) for the design rationale,
+full/half/quarter/eighth-resolution features. At half, quarter, and eighth scales it
+estimates bounded global translation, performs 3x3 spatial-temporal correlation,
+and applies dense offset refinement with valid temporal masks. It does not require
+an optical-flow dependency. The quarter and half scales preserve tiny-ball detail. See [`docs/模型升级方案.md`](docs/模型升级方案.md) for the design rationale,
 constraints, and literature links.
 
 > [!IMPORTANT]

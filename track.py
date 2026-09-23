@@ -15,6 +15,7 @@ from models_factory.builder import build_model
 from datasets_factory.transforms.tracknet_transforms import (
     Resize, ConcatChannels
 )
+from core.windowing import iter_sliding_windows
 
 # --- 1. “模型配置库” ---
 MODEL_CONFIGS = {
@@ -48,6 +49,10 @@ MODEL_CONFIGS = {
         num_frames=5,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
     ),
+    'motion5_causal': dict(
+        type='TrackNetMotion', num_frames=5,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
+    ),
 }
 
 INPUT_HEIGHT = 288
@@ -66,6 +71,13 @@ CANONICAL_FIELDS = [
     'width',
     'height',
 ]
+
+
+def _load_model_weights(model, weights_path, device='cpu'):
+    checkpoint = torch.load(weights_path, map_location=device)
+    state_dict = checkpoint.get('model', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    model.load_state_dict(state_dict)
+    return checkpoint
 
 
 def canonical_row(sample_id, video_name, frame_number, coords, fps, width, height):
@@ -235,69 +247,84 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
     pbar = tqdm(total=metadata_frame_count or None, desc=f"Processing {video_path.stem}")
     start_time = time.time()
 
+    def run_window(frames, output_positions):
+        nonlocal decoded_frame_count, detected_frames_count
+        rgb_frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
+        data_dict = dict(zip(frame_keys, rgb_frames))
+        data_dict = concatenator(resizer(data_dict))
+        resized_frames = [data_dict[key] for key in frame_keys]
+        image_np = data_dict['image']
+        image_tensor = torch.from_numpy(
+            image_np.transpose(2, 0, 1)
+        ).float().div(255).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            prediction = model(image_tensor)
+            if isinstance(prediction, dict):
+                prediction = prediction['heatmap']
+            heatmaps_np = prediction.squeeze(0).cpu().numpy()
+        if heatmaps_np.shape != (num_frames, INPUT_HEIGHT, INPUT_WIDTH):
+            raise ValueError(
+                f"Unexpected model output shape: {heatmaps_np.shape}, "
+                f"expected {(num_frames, INPUT_HEIGHT, INPUT_WIDTH)}"
+            )
+        threshold_uint8 = int(threshold * 255)
+
+        for output_position, frame_number in output_positions:
+            single_heatmap_np = heatmaps_np[output_position]
+            heatmap_uint8 = (single_heatmap_np * 255).astype(np.uint8)
+            coords = _heatmap_to_coords(heatmap_uint8, threshold=threshold_uint8)
+            if coords is not None:
+                detected_frames_count += 1
+                trajectory_points.append(coords)
+            else:
+                trajectory_points.append(None)
+            csv_data.append(canonical_row(
+                video_path.stem, video_path.name, frame_number, coords,
+                fps, width, height,
+            ))
+
+            if writer_traj is not None and writer_comp is not None:
+                frame_to_draw = cv2.cvtColor(resized_frames[output_position], cv2.COLOR_RGB2BGR)
+                final_traj_frame = draw_comet_tail(frame_to_draw, trajectory_points)
+                writer_traj.write(final_traj_frame)
+                heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+                writer_comp.write(np.hstack((final_traj_frame, heatmap_color)))
+
     try:
-        while cap.isOpened():
-            frames = []
-            for _ in range(num_frames):
-                readable, frame = cap.read()
-                if not readable:
+        window_mode = getattr(args, 'window_mode', None)
+        if window_mode is None:
+            # Keep the T-frame input/output contract by default. Center and
+            # causal modes are explicit single-frame sliding alternatives.
+            window_mode = 'chunk'
+        if getattr(args, 'arch', '') == 'motion5_causal':
+            window_mode = 'causal'
+        if window_mode in ('center', 'causal'):
+            for frames, output_position, frame_number in iter_sliding_windows(cap, num_frames, window_mode):
+                run_window(frames, [(output_position, frame_number)])
+                decoded_frame_count += 1
+                pbar.update(1)
+        else:
+            while cap.isOpened():
+                frames = []
+                for _ in range(num_frames):
+                    readable, frame = cap.read()
+                    if not readable:
+                        break
+                    frames.append(frame)
+                if not frames:
                     break
-                frames.append(frame)
-            if not frames:
-                break
-            actual_frame_count = len(frames)
-            while len(frames) < num_frames:
-                frames.append(frames[-1])
-
-            rgb_frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
-            data_dict = dict(zip(frame_keys, rgb_frames))
-            data_dict = concatenator(resizer(data_dict))
-            resized_frames = [data_dict[key] for key in frame_keys]
-            image_np = data_dict['image']
-            image_tensor = torch.from_numpy(
-                image_np.transpose(2, 0, 1)
-            ).float().div(255).unsqueeze(0).to(device)
-
-            with torch.no_grad():
-                heatmaps_np = model(image_tensor).squeeze(0).cpu().numpy()
-            if heatmaps_np.shape != (num_frames, INPUT_HEIGHT, INPUT_WIDTH):
-                raise ValueError(
-                    f"Unexpected model output shape: {heatmaps_np.shape}, "
-                    f"expected {(num_frames, INPUT_HEIGHT, INPUT_WIDTH)}"
+                actual_frame_count = len(frames)
+                while len(frames) < num_frames:
+                    frames.append(frames[-1])
+                run_window(
+                    frames,
+                    [(offset, decoded_frame_count + offset) for offset in range(actual_frame_count)],
                 )
-            threshold_uint8 = int(threshold * 255)
-
-            for offset, single_heatmap_np in enumerate(
-                heatmaps_np[:actual_frame_count]
-            ):
-                heatmap_uint8 = (single_heatmap_np * 255).astype(np.uint8)
-                coords = _heatmap_to_coords(heatmap_uint8, threshold=threshold_uint8)
-                if coords is not None:
-                    detected_frames_count += 1
-                    trajectory_points.append(coords)
-                else:
-                    trajectory_points.append(None)
-                csv_data.append(canonical_row(
-                    video_path.stem,
-                    video_path.name,
-                    decoded_frame_count + offset,
-                    coords,
-                    fps,
-                    width,
-                    height,
-                ))
-
-                if writer_traj is not None and writer_comp is not None:
-                    frame_to_draw = cv2.cvtColor(resized_frames[offset], cv2.COLOR_RGB2BGR)
-                    final_traj_frame = draw_comet_tail(frame_to_draw, trajectory_points)
-                    writer_traj.write(final_traj_frame)
-                    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-                    writer_comp.write(np.hstack((final_traj_frame, heatmap_color)))
-
-            decoded_frame_count += actual_frame_count
-            pbar.update(actual_frame_count)
-            if actual_frame_count < num_frames:
-                break
+                decoded_frame_count += actual_frame_count
+                pbar.update(actual_frame_count)
+                if actual_frame_count < num_frames:
+                    break
     finally:
         pbar.close()
         cap.release()
@@ -354,6 +381,11 @@ def build_parser():
         help='Confidence threshold for detection [0, 1).',
     )
     parser.add_argument(
+        '--window-mode', choices=('chunk', 'center', 'causal'), default=None,
+        help='Temporal inference semantics. Motion models default to center; '
+             'causal uses only past frames, chunk preserves legacy non-overlap.',
+    )
+    parser.add_argument(
         '--output-dir',
         type=Path,
         required=True,
@@ -403,7 +435,7 @@ def main():
     print(f"🚀 Starting Batch Inference Pipeline for [TrackNet {args.arch.upper()}]...")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     model = build_model(model_cfg)
-    model.load_state_dict(torch.load(weights_path, map_location='cpu'))
+    _load_model_weights(model, weights_path, device='cpu')
     model.to(device).eval()
     print(f"✅ Model loaded from {weights_path} and sent to {device}.")
 

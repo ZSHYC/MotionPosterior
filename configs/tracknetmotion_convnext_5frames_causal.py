@@ -1,4 +1,4 @@
-"""Five-frame TrackNetMotion configuration."""
+"""Five-frame causal TrackNetMotion training configuration."""
 
 from pathlib import Path
 
@@ -6,13 +6,11 @@ input_size = (288, 512)
 original_size = (1080, 1920)
 data_root = './data/benchmark'
 num_frames = 5
-frame_keys = ['path_prev2', 'path_prev', 'path', 'path_next', 'path_next2']
-target_keys = ['gt_path_prev2', 'gt_path_prev', 'gt_path', 'gt_path_next', 'gt_path_next2']
+frame_keys = ['path_prev4', 'path_prev3', 'path_prev2', 'path_prev', 'path']
+target_keys = ['gt_path_prev4', 'gt_path_prev3', 'gt_path_prev2', 'gt_path_prev', 'gt_path']
 
 model = dict(
-    type='TrackNetMotion',
-    num_frames=num_frames,
-    return_aux=True,
+    type='TrackNetMotion', num_frames=num_frames, return_aux=True,
     backbone=dict(type='MotionConvNeXtBackbone', num_frames=num_frames),
 )
 
@@ -25,13 +23,12 @@ pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=2,
-    workers_per_gpu=4,
+    samples_per_gpu=2, workers_per_gpu=4,
     train=dict(type='TennisDataset', data_dir=data_root,
-               csv_path=f'{data_root}/labels_context5_train.csv',
+               csv_path=f'{data_root}/labels_causal5_train.csv',
                input_height=input_size[0], input_width=input_size[1], pipeline=pipeline),
     val=dict(type='TennisDataset', data_dir=data_root,
-             csv_path=f'{data_root}/labels_context5_val.csv',
+             csv_path=f'{data_root}/labels_causal5_val.csv',
              input_height=input_size[0], input_width=input_size[1], pipeline=pipeline),
 )
 

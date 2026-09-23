@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 from scipy.spatial import distance
 import torch
-from sympy.codegen.cfunctions import isnan
 import math
 from ..builder import METRICS
 
@@ -46,10 +45,13 @@ class TrackNetV2Metric:
     def reset(self):
         """清空计分板。"""
         self.tp, self.fp1, self.fp2, self.fp, self.tn, self.fn = 0, 0, 0, 0, 0, 0
+        self.pixel_errors = []
 
     def update(self, logits: torch.Tensor, batch: dict):
         """根据一个批次的数据，更新计分板。"""
-        predictions = logits.cpu().numpy() * 255
+        if isinstance(logits, dict):
+            logits = logits["heatmap"]
+        predictions = logits.detach().cpu().numpy() * 255
         _, c, h, w = predictions.shape
         scale_h = h / self.original_h
         scale_w = w / self.original_w
@@ -74,6 +76,7 @@ class TrackNetV2Metric:
                             self.fp2 += 1
                             continue
                         dist = distance.euclidean((x_pred, y_pred), (x_gt_scaled, y_gt_scaled))
+                        self.pixel_errors.append(float(dist))
                         if dist < self.min_dist:
                             self.tp += 1
                         else:
@@ -95,6 +98,8 @@ class TrackNetV2Metric:
         precision = self.tp / (self.tp + self.fp + eps)
         recall = self.tp / (self.tp + self.fn + eps)
         f1 = 2 * precision * recall / (precision + recall + eps)
+        mean_error = float(np.mean(self.pixel_errors)) if self.pixel_errors else float("nan")
+        p90_error = float(np.percentile(self.pixel_errors, 90)) if self.pixel_errors else float("nan")
 
         return {
             'Total': total,
@@ -107,5 +112,7 @@ class TrackNetV2Metric:
             'Accuracy': accuracy,
             'Precision': precision,
             'Recall': recall,
-            'F1-Score': f1
+            'F1-Score': f1,
+            'MeanPixelError': mean_error,
+            'P90PixelError': p90_error,
         }

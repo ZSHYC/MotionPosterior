@@ -17,10 +17,15 @@ def create_gaussian_kernel(size, variance):
 
 def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
     num_frames = config.get('num_frames', 3)
+    window_type = config.get('window_type', 'center')
     if num_frames not in (3, 5):
         raise ValueError('num_frames must be 3 or 5')
     if num_frames == 5 and mode != 'context':
         raise ValueError('5-frame preprocessing is available for context mode only')
+    if window_type not in ('center', 'causal'):
+        raise ValueError('window_type must be center or causal')
+    if window_type == 'causal' and (mode != 'context' or num_frames != 5):
+        raise ValueError('causal preprocessing currently requires 5-frame context mode')
     gaussian_kernel = create_gaussian_kernel(config['size'], config['variance'])
     kernel_size = config['size']
     height, width = config['height'], config['width']
@@ -67,14 +72,13 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
                     if x_max > x_min and y_max > y_min:
                         heatmap[y_min:y_max, x_min:x_max] = gaussian_kernel[kernel_y_min:kernel_y_max,
                                                             kernel_x_min:kernel_x_max]
-                heatmap[heatmap > 0] = 255
-
                 # 3. 无论画布上是否有斑点，都将它保存下来
                 cv2.imwrite(str(gt_path), heatmap)
         # ✨✨✨ 核心改动区域结束 ✨✨✨
 
         clip_df['gt_path'] = gt_paths
         base_path_col = clip_root.relative_to(input_dir)
+        clip_df['_clip_id'] = str(base_path_col)
         clip_df['path'] = [str(base_path_col / fname) for fname in clip_df['file name']]
 
         # ✨✨✨ 新增：为每帧添加前后帧的信息 ✨✨✨
@@ -121,7 +125,12 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
             clip_df['status_next'] = clip_df['status'].shift(-1)
 
         elif mode == 'context' and num_frames == 5:
-            for suffix, offset in [('prev2', 2), ('prev', 1), ('next', -1), ('next2', -2)]:
+            neighbours = (
+                [('prev4', 4), ('prev3', 3), ('prev2', 2), ('prev', 1)]
+                if window_type == 'causal' else
+                [('prev2', 2), ('prev', 1), ('next', -1), ('next2', -2)]
+            )
+            for suffix, offset in neighbours:
                 clip_df[f'path_{suffix}'] = clip_df['path'].shift(offset)
                 clip_df[f'gt_path_{suffix}'] = clip_df['gt_path'].shift(offset)
                 clip_df[f'x_{suffix}'] = clip_df['x-coordinate'].shift(offset)
@@ -130,8 +139,11 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
                 clip_df[f'status_{suffix}'] = clip_df['status'].shift(offset)
 
         # 删除没有完整时序上下文的首尾帧。
-        radius = num_frames // 2
-        clip_df = clip_df.iloc[radius:-radius]
+        if window_type == 'causal':
+            clip_df = clip_df.iloc[num_frames - 1:]
+        else:
+            radius = num_frames // 2
+            clip_df = clip_df.iloc[radius:-radius]
 
         all_clip_dfs.append(clip_df)
 
@@ -155,6 +167,15 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
             'visibility_prev', 'visibility', 'visibility_next',  # 三个visibility
             'status_prev', 'status', 'status_next'  # 三个status
         ]
+    elif mode == 'context' and num_frames == 5 and window_type == 'causal':
+        final_columns = [
+            'path_prev4', 'path_prev3', 'path_prev2', 'path_prev', 'path',
+            'gt_path_prev4', 'gt_path_prev3', 'gt_path_prev2', 'gt_path_prev', 'gt_path',
+            'x_prev4', 'y_prev4', 'x_prev3', 'y_prev3', 'x_prev2', 'y_prev2',
+            'x_prev', 'y_prev', 'x-coordinate', 'y-coordinate',
+            'visibility_prev4', 'visibility_prev3', 'visibility_prev2', 'visibility_prev', 'visibility',
+            'status_prev4', 'status_prev3', 'status_prev2', 'status_prev', 'status',
+        ]
     elif mode == 'context' and num_frames == 5:
         final_columns = [
             'path_prev2', 'path_prev', 'path', 'path_next', 'path_next2',
@@ -165,7 +186,7 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
             'status_prev2', 'status_prev', 'status', 'status_next', 'status_next2'
         ]
 
-    final_df = master_df[final_columns]
+    final_df = master_df[final_columns + ['_clip_id']]
 
     # 重命名列以保持一致性
     column_rename = {
@@ -176,13 +197,27 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
     }
     final_df = final_df.rename(columns=column_rename)
 
-    final_df = final_df.sample(frac=1, random_state=42).reset_index(drop=True)
-    num_train = int(len(final_df) * config['train_rate'])
+    train_rate = float(config['train_rate'])
+    if not 0.0 < train_rate < 1.0:
+        raise ValueError('train_rate must be strictly between 0 and 1')
+    # Split by clip, never by adjacent windows.  Random row splitting leaks
+    # nearly identical neighbouring frames into validation.
+    clip_ids = np.array(sorted(final_df['_clip_id'].unique()))
+    rng = np.random.default_rng(42)
+    rng.shuffle(clip_ids)
+    if len(clip_ids) > 1:
+        num_train_clips = min(max(1, int(round(len(clip_ids) * train_rate))), len(clip_ids) - 1)
+        train_ids = set(clip_ids[:num_train_clips])
+        df_train = final_df[final_df['_clip_id'].isin(train_ids)]
+        df_val = final_df[~final_df['_clip_id'].isin(train_ids)]
+    else:
+        # A single clip cannot provide an honest group holdout; keep it in
+        # train and emit an empty validation CSV instead of leaking windows.
+        df_train, df_val = final_df, final_df.iloc[0:0]
+    df_train = df_train.drop(columns=['_clip_id']).reset_index(drop=True)
+    df_val = df_val.drop(columns=['_clip_id']).reset_index(drop=True)
 
-    df_train = final_df.iloc[:num_train]
-    df_val = final_df.iloc[num_train:]
-
-    label_suffix = f'{mode}5' if mode == 'context' and num_frames == 5 else mode
+    label_suffix = ('causal5' if window_type == 'causal' else f'{mode}5') if mode == 'context' and num_frames == 5 else mode
     train_csv_path = output_dir / f"labels_{label_suffix}_train.csv"
     val_csv_path = output_dir / f"labels_{label_suffix}_val.csv"
 
@@ -197,7 +232,7 @@ def process_data(input_dir: Path, output_dir: Path, mode: str, config: dict):
     print("\n📊 Example of first row in final dataset:")
     if not df_train.empty:
         sample = df_train.iloc[0]
-        frame_labels = ('prev2', 'prev', 'current', 'next', 'next2') if num_frames == 5 else ('prev', 'current', 'next')
+        frame_labels = (('prev4', 'prev3', 'prev2', 'prev', 'current') if window_type == 'causal' else ('prev2', 'prev', 'current', 'next', 'next2')) if num_frames == 5 else ('prev', 'current', 'next')
         print("Image paths:", ', '.join(str(sample['path' if label == 'current' else f'path_{label}']) for label in frame_labels))
         print("GT paths:", ', '.join(str(sample['gt_path' if label == 'current' else f'gt_path_{label}']) for label in frame_labels))
 
@@ -210,18 +245,21 @@ if __name__ == '__main__':
     parser.add_argument('--mode', '-m', type=str, required=True, choices=['past', 'context'], help="Processing mode.")
     parser.add_argument('--num-frames', type=int, choices=[3, 5], default=3,
                         help='Temporal context length. 5 is supported for context mode.')
+    parser.add_argument('--window-type', choices=['center', 'causal'], default='center',
+                        help='Five-frame training window layout.')
     parser.add_argument('--height', type=int, default=1080, help='Target image height.')
     parser.add_argument('--width', type=int, default=1920, help='Target image width.')
     parser.add_argument('--size', type=int, default=40, help='Radius of the Gaussian kernel.')
     parser.add_argument('--variance', type=float, default=10, help='Variance of the Gaussian kernel.')
-    parser.add_argument('--train_rate', type=float, default=0.0, help='Proportion of the dataset to use for training.')
+    parser.add_argument('--train_rate', type=float, default=0.8, help='Proportion of clips to use for training.')
 
     args = parser.parse_args()
 
     config = {
         'height': args.height, 'width': args.width,
         'size': args.size, 'variance': args.variance,
-        'train_rate': args.train_rate, 'num_frames': args.num_frames
+        'train_rate': args.train_rate, 'num_frames': args.num_frames,
+        'window_type': args.window_type,
     }
 
     print(config)
