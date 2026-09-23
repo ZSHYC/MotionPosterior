@@ -63,6 +63,10 @@ class _LocalMotionFusion(nn.Module):
         q = self.query(x.reshape(b * t, c, h, w)).reshape(b, t, c, h, w)
         k = self.key(x.reshape(b * t, c, h, w)).reshape(b, t, c, h, w)
         v = self.value(x.reshape(b * t, c, h, w)).reshape(b, t, c, h, w)
+        # Cosine-style local correlation keeps the attention scale stable as
+        # feature norms change across training stages.
+        q = F.normalize(q, dim=2)
+        k = F.normalize(k, dim=2)
         neighbors, valid = [], []
         for offset in range(-self.radius, self.radius + 1):
             indices = [min(max(i + offset, 0), t - 1) for i in range(t)]
