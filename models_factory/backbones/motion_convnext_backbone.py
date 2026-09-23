@@ -2,9 +2,10 @@
 
 The motion block is deliberately self contained: it estimates a bounded global
 translation, searches a 3x3 spatial neighbourhood on the compensated feature,
-and predicts a dense residual offset for a final refinement.  This follows the
-same short-term alignment idea used by modern video small-object detectors,
-without requiring an external optical-flow model.
+and predicts a dense residual offset for a final refinement.  The local search
+radius is conditioned on an inexpensive velocity/uncertainty state predicted
+from each temporal pair, so fast or ambiguous motion can use a wider search
+without paying for a dense full-frame cost volume.
 """
 
 import torch
@@ -66,6 +67,15 @@ class _SpatialTemporalMotionFusion(nn.Module):
             nn.Linear(hidden, 2),
             nn.Tanh(),
         )
+        # A pair-level state controls the local search radius.  The first two
+        # values are a bounded velocity proxy and the last is uncertainty.  This
+        # is intentionally feature-only: it keeps the backbone independent from
+        # the task head while making the search motion aware.
+        self.motion_state = nn.Sequential(
+            nn.Linear(channels * 3, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 3),
+        )
         self.offset = nn.Sequential(
             nn.Conv2d(channels * 3, hidden, 3, padding=1),
             nn.GELU(),
@@ -78,10 +88,16 @@ class _SpatialTemporalMotionFusion(nn.Module):
             nn.Sigmoid(),
         )
         self.temperature = nn.Parameter(torch.tensor(1.0))
-        self.motion_scale = nn.Parameter(torch.tensor(0.0))
+        # A strict zero made every alignment path receive zero gradient at
+        # initialization (the output was x + 0 * aligned).  A small positive
+        # residual keeps the block near-identity while allowing q/k/value and
+        # offset branches to learn from the first step.
+        self.motion_scale = nn.Parameter(torch.tensor(0.1))
         nn.init.zeros_(self.global_shift[2].weight)
         nn.init.zeros_(self.global_shift[2].bias)
-        nn.init.zeros_(self.offset[2].weight)
+        # Keep the initial offset tiny without severing gradients through the
+        # preceding offset features (a zero final convolution would do that).
+        nn.init.normal_(self.offset[2].weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.offset[2].bias)
 
     @staticmethod
@@ -116,6 +132,13 @@ class _SpatialTemporalMotionFusion(nn.Module):
             )
             shift = self.global_shift(pair_desc.reshape(b * t, -1))
             shift = shift * self.max_global_shift
+            motion_state = self.motion_state(pair_desc.reshape(b * t, -1))
+            velocity_proxy = torch.tanh(motion_state[:, :2]).norm(dim=1)
+            uncertainty = torch.sigmoid(motion_state[:, 2])
+            # Radius is measured in the current feature map's pixel units.  The
+            # base 3x3 neighbourhood remains available, while fast/uncertain
+            # pairs expand it continuously (and differentiably) up to 2.5x.
+            radius_scale = (1.0 + 0.75 * velocity_proxy + 0.75 * uncertainty).clamp(1.0, 2.5)
             grid = base_grid.expand(b * t, -1, -1, -1) + shift[:, None, None, :]
             warped = F.grid_sample(
                 neighbour.reshape(b * t, c, h, w), grid,
@@ -137,6 +160,8 @@ class _SpatialTemporalMotionFusion(nn.Module):
             )
             dx = sum(local_weights[:, i] * disp[0] for i, disp in enumerate(displacements))
             dy = sum(local_weights[:, i] * disp[1] for i, disp in enumerate(displacements))
+            dx = dx * radius_scale[:, None, None]
+            dy = dy * radius_scale[:, None, None]
             local_grid = base_grid.expand(b * t, -1, -1, -1) + torch.stack(
                 (dx * (2.0 / max(w - 1, 1)), dy * (2.0 / max(h - 1, 1))), dim=-1
             )
@@ -163,7 +188,7 @@ class _SpatialTemporalMotionFusion(nn.Module):
             aligned, refined_grid, mode="bilinear", padding_mode="border", align_corners=True
         )
         gate = self.gate(torch.cat((x_flat, motion), dim=1))
-        return (x_flat + self.motion_scale * gate * aligned).reshape(b, t, c, h, w)
+        return (x_flat + self.motion_scale.clamp_min(0.01) * gate * aligned).reshape(b, t, c, h, w)
 
 
 # Keep the old private name available for code importing it from early versions.
