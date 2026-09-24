@@ -108,9 +108,14 @@ class ValidationVisualizerV2Hook(BaseHook):
 
                 # 绘制绿色的真实标记
                 if not math.isnan(x_gt[frame_idx]) and not math.isnan(y_gt[frame_idx]):
-                    x_gt_scaled = int(x_gt[frame_idx] * (w / self.original_w))
-                    y_gt_scaled = int(y_gt[frame_idx] * (h / self.original_h))
-                    cv2.drawMarker(input_img, (x_gt_scaled, y_gt_scaled),
+                    # Current dataset metadata is already in model-image
+                    # pixels.  Scale only legacy source-resolution metadata.
+                    x_gt_scaled = x_gt[frame_idx]
+                    y_gt_scaled = y_gt[frame_idx]
+                    if x_gt_scaled > w or y_gt_scaled > h:
+                        x_gt_scaled = x_gt_scaled * (w / self.original_w)
+                        y_gt_scaled = y_gt_scaled * (h / self.original_h)
+                    cv2.drawMarker(input_img, (int(x_gt_scaled), int(y_gt_scaled)),
                                    color=(0, 255, 0), markerType=cv2.MARKER_CROSS,
                                    markerSize=15, thickness=2)
 
