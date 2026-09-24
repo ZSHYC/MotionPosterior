@@ -1,5 +1,7 @@
 # MotionPosterior：面向高速小目标的运动条件后验估计
 
+**[English README](README.md)**
+
 **基于 TrackNetV5 迭代的高速小目标运动后验估计模型 PyTorch 实现。**
 
 本仓库提供 MotionPosterior 的模型实现、训练框架、数据预处理工具和评估接口。模型保留 TrackNetV5 的高效三帧建模形式，并扩展到对称五帧和因果五帧推理；输出从热力图定位扩展为包含几何偏移、可见性和定位不确定度的时空后验。
@@ -64,14 +66,90 @@ pip install -r requirements.txt
 
 ## 数据准备
 
-预处理脚本将帧目录和 `Label.csv` 标注转换为软高斯热力图及按 clip 划分的训练/验证 CSV。
+数据流程在 [TrackNetV5 SDK](https://github.com/codelancera-offical/TrackNetV5-SDK) 的三帧上下文构造方式上扩展五帧窗口。先准备已抽取的视频帧及每个 clip 的 `Label.csv`。预处理脚本读取标注、生成高斯监督图和时序窗口索引，并按 clip 划分训练/验证 CSV；它不负责从视频抽帧。
+
+### 原始数据目录
+
+每个 clip 需要包含帧文件和对应标注：
+
+```text
+data/benchmark/
+├── clip_0001/
+│   ├── frame_000001.jpg
+│   ├── frame_000002.jpg
+│   ├── ...
+│   └── Label.csv
+├── clip_0002/
+│   ├── frame_000001.jpg
+│   ├── ...
+│   └── Label.csv
+└── ...
+```
+
+`Label.csv` 必须包含以下字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `file name` | 相对于当前 clip 目录的帧文件名 |
+| `x-coordinate` | 原始帧像素坐标中的目标 x 坐标 |
+| `y-coordinate` | 原始帧像素坐标中的目标 y 坐标 |
+| `visibility` | 目标可见为 `1`，不可见为 `0` |
+| `status` | 保留到时序 CSV 的帧/状态标签 |
+
+标注示例：
+
+```csv
+file name,x-coordinate,y-coordinate,visibility,status
+frame_000001.jpg,417,201,1,0
+frame_000002.jpg,,,0,0
+```
+
+CSV 行必须按时间顺序排列：窗口顺序由 CSV 行序决定。目标可见时，两个坐标都必须使用原始帧的像素坐标；不可见时将 `visibility` 设为 `0`，未知坐标可以留空。`status` 列需要保留，虽然它不直接参与训练监督。
+
+### 监督图与输出目录
+
+脚本会为每一帧在 `gts/` 下生成灰度高斯热力图，并保留原始 clip 的相对目录结构。可见目标使用 `--size` 作为高斯核半径、`--variance` 作为方差；不可见目标生成全零热力图。监督图保存为 `[0, 255]` 的软 `uint8` 图像，训练 pipeline 再将其缩放到模型输入分辨率。
+
+生成后的目录结构如下：
+
+```text
+data/benchmark/
+├── clip_0001/                 # 原始帧与 Label.csv 保留在此
+├── clip_0002/
+├── gts/clip_0001/<frame>.png
+├── gts/clip_0002/<frame>.png
+├── labels_context_train.csv   # 运行三帧命令后生成
+├── labels_context_val.csv
+├── labels_context5_train.csv  # 运行五帧中心命令后生成
+├── labels_context5_val.csv
+├── labels_causal5_train.csv   # 运行五帧因果命令后生成
+└── labels_causal5_val.csv
+```
+
+每个上下文 CSV 包含相对于 `data/benchmark/` 的原帧与热力图路径，以及坐标、visibility、status。clip 标识只在划分时使用，不写入最终 CSV。数据加载器保持显式时序顺序，输出按通道拼接的图像 `[3T, H, W]`、目标 `[T, H, W]`、坐标 `[T, 2]` 和 visibility `[T]`。
+
+### 时序窗口构造
+
+| 模式 | 窗口 | 每个 clip 边界删除的行 | 输出 CSV |
+| --- | --- | --- | --- |
+| 三帧中心 | `[t-1, t, t+1]` | 两端各 1 帧 | `labels_context_{train,val}.csv` |
+| 五帧中心 | `[t-2, t-1, t, t+1, t+2]` | 两端各 2 帧 | `labels_context5_{train,val}.csv` |
+| 五帧因果 | `[t-4, t-3, t-2, t-1, t]` | 开头 4 帧 | `labels_causal5_{train,val}.csv` |
+
+没有完整上下文的边界行会在预处理阶段删除。因果窗口不会读取未来帧。以下实验使用 `--mode context`。
+
+### 划分策略与参数
+
+划分以 clip 为单位执行，不按窗口随机划分，避免相邻帧同时出现在训练集和验证集。划分器使用固定随机种子 `42`，并要求至少两个能构成完整窗口的 clip。`--train_rate` 控制训练 clip 比例。`--height` 和 `--width` 应设置为像素标注所对应的原始帧尺寸：脚本直接在该坐标系绘制热力图，不会自行缩放标注。默认尺寸为 `1080 × 1920`；训练 pipeline 再把图像、热力图和坐标缩放到 `288 × 512`。若原始尺寸不同，还需同步修改所选训练配置中的 `original_size`。
+
+以下命令把 `./data/benchmark` 同时作为输入和输出，因为现有训练配置会从该根目录读取原帧及生成的 `gts/`。三条命令可在同一目录依次执行，每条生成一对训练/验证 CSV。
 
 三帧上下文：
 
 ```bash
 python tools/preprocess_data_gauss.py \
-  --input_dir <raw_data> \
-  --output_dir <processed_data> \
+  --input_dir ./data/benchmark \
+  --output_dir ./data/benchmark \
   --mode context \
   --num-frames 3 \
   --train_rate 0.8
@@ -81,8 +159,8 @@ python tools/preprocess_data_gauss.py \
 
 ```bash
 python tools/preprocess_data_gauss.py \
-  --input_dir <raw_data> \
-  --output_dir <processed_data> \
+  --input_dir ./data/benchmark \
+  --output_dir ./data/benchmark \
   --mode context \
   --num-frames 5 \
   --window-type center \
@@ -93,8 +171,8 @@ python tools/preprocess_data_gauss.py \
 
 ```bash
 python tools/preprocess_data_gauss.py \
-  --input_dir <raw_data> \
-  --output_dir <processed_data> \
+  --input_dir ./data/benchmark \
+  --output_dir ./data/benchmark \
   --mode context \
   --num-frames 5 \
   --window-type causal \

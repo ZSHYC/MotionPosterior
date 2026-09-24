@@ -1,5 +1,7 @@
 # MotionPosterior: Motion-Conditioned Posterior Estimation for Fast Small-Object Tracking
 
+**[中文版 / Chinese](README_CN.md)**
+
 **PyTorch implementation of MotionPosterior, an iterative extension of TrackNetV5 for motion-conditioned posterior estimation of fast-moving small objects.**
 
 This repository contains the model implementation, training pipeline, preprocessing tools, and evaluation interfaces used to study dense heatmap localization with explicit motion and geometric uncertainty. The proposed model preserves the efficient three-frame formulation of TrackNetV5 and extends it to symmetric and causal five-frame inference.
@@ -65,14 +67,90 @@ The repository does not require a third-party optical-flow package. The complete
 
 ## Data preparation
 
-The preprocessing script converts frame directories and `Label.csv` annotations into soft Gaussian heatmaps and grouped train/validation CSV files. Train/validation splitting is performed at clip level.
+The data pipeline extends the three-frame context construction in the [TrackNetV5 SDK](https://github.com/codelancera-offical/TrackNetV5-SDK) to five-frame windows. Prepare extracted frames and one `Label.csv` per clip. The script reads the annotations, renders Gaussian targets, builds temporal window indices, and writes clip-disjoint train/validation CSV files. It does not extract frames from video.
+
+### Expected raw-data layout
+
+Each clip must contain its frames and its annotation file:
+
+```text
+data/benchmark/
+├── clip_0001/
+│   ├── frame_000001.jpg
+│   ├── frame_000002.jpg
+│   ├── ...
+│   └── Label.csv
+├── clip_0002/
+│   ├── frame_000001.jpg
+│   ├── ...
+│   └── Label.csv
+└── ...
+```
+
+`Label.csv` must contain the following columns:
+
+| Column | Definition |
+| --- | --- |
+| `file name` | Frame filename relative to the clip directory |
+| `x-coordinate` | Target x coordinate in the original frame pixels |
+| `y-coordinate` | Target y coordinate in the original frame pixels |
+| `visibility` | `1` when the target is visible, `0` otherwise |
+| `status` | Frame/status label retained in the generated context CSV |
+
+For example:
+
+```csv
+file name,x-coordinate,y-coordinate,visibility,status
+frame_000001.jpg,417,201,1,0
+frame_000002.jpg,,,0,0
+```
+
+Rows must be ordered by time: the CSV row order defines the temporal windows. For a visible frame, provide both coordinates in the original frame's pixel system; for an invisible frame, set `visibility` to `0` and leave coordinates empty if unknown. Keep `status` present even if it is not used as a training target.
+
+### Target generation and output
+
+For every annotated frame, the script writes a grayscale Gaussian heatmap under `gts/` while preserving the clip-relative directory structure. Visible targets are rendered with `--size` as the kernel radius and `--variance` as the Gaussian variance; invisible targets produce an all-zero heatmap. The targets are stored as soft `uint8` maps in `[0, 255]` and are resized to the model resolution in the training pipeline.
+
+The generated dataset has the following structure:
+
+```text
+data/benchmark/
+├── clip_0001/                 # source frames and Label.csv remain here
+├── clip_0002/
+├── gts/clip_0001/<frame>.png
+├── gts/clip_0002/<frame>.png
+├── labels_context_train.csv   # after the three-frame command
+├── labels_context_val.csv
+├── labels_context5_train.csv  # after the five-frame centered command
+├── labels_context5_val.csv
+├── labels_causal5_train.csv   # after the five-frame causal command
+└── labels_causal5_val.csv
+```
+
+Each context CSV stores frame and heatmap paths relative to `data/benchmark/`, plus coordinates, visibility, and status. Clip IDs are used for the split and then dropped from the saved CSVs. The loader preserves temporal order and returns a channel-concatenated image `[3T, H, W]`, targets `[T, H, W]`, coordinates `[T, 2]`, and visibility `[T]`.
+
+### Temporal window construction
+
+| Mode | Window | Rows removed at each clip boundary | Output CSV |
+| --- | --- | --- | --- |
+| 3-frame center | `[t-1, t, t+1]` | first and last frame | `labels_context_{train,val}.csv` |
+| 5-frame center | `[t-2, t-1, t, t+1, t+2]` | first and last two frames | `labels_context5_{train,val}.csv` |
+| 5-frame causal | `[t-4, t-3, t-2, t-1, t]` | first 4 frames | `labels_causal5_{train,val}.csv` |
+
+Boundary rows without a complete context are removed during preprocessing. The causal layout never reads a future frame. Use `--mode context` for the experiments below.
+
+### Split policy and preprocessing parameters
+
+Splitting is performed by clip, never by individual windows, to prevent adjacent frames from appearing in both training and validation. The splitter uses a fixed seed (`42`) and requires at least two clips with complete windows. `--train_rate` controls the fraction of clips assigned to training. Set `--height` and `--width` to the source frame dimensions used by the pixel annotations: the script renders heatmaps directly in that coordinate system and does not rescale coordinates. The defaults are `1080 × 1920`; the training pipeline then resizes images, heatmaps, and coordinates to `288 × 512`. If the source resolution differs, also update `original_size` in the selected training configuration.
+
+The commands below use `./data/benchmark` as both input and output because the supplied training configurations resolve source frames and generated `gts/` relative to that same root. Each command adds one train/validation CSV pair and can be run on the same directory.
 
 Three-frame context:
 
 ```bash
 python tools/preprocess_data_gauss.py \
-  --input_dir <raw_data> \
-  --output_dir <processed_data> \
+  --input_dir ./data/benchmark \
+  --output_dir ./data/benchmark \
   --mode context \
   --num-frames 3 \
   --train_rate 0.8
@@ -82,8 +160,8 @@ Five-frame centered context:
 
 ```bash
 python tools/preprocess_data_gauss.py \
-  --input_dir <raw_data> \
-  --output_dir <processed_data> \
+  --input_dir ./data/benchmark \
+  --output_dir ./data/benchmark \
   --mode context \
   --num-frames 5 \
   --window-type center \
@@ -94,8 +172,8 @@ Five-frame causal context:
 
 ```bash
 python tools/preprocess_data_gauss.py \
-  --input_dir <raw_data> \
-  --output_dir <processed_data> \
+  --input_dir ./data/benchmark \
+  --output_dir ./data/benchmark \
   --mode context \
   --num-frames 5 \
   --window-type causal \
