@@ -1,6 +1,9 @@
-# TrackNetV5 SDK Documentation
+# MotionPosterior
 
-本仓库是 **TrackNetV5** 专用软件开发工具包（SDK），提供网球追踪算法的标准工程化实现。由 **上海代号零体育科技有限公司** 开发并持有。
+本仓库是 **MotionPosterior** 专用软件开发工具包（SDK），提供面向高速小目标的运动感知后验估计与轨迹追踪实现。当前基准任务是网球追踪，但公开架构不限定于 rally 或体育场景。由 **上海代号零体育科技有限公司** 开发并持有。
+
+公开模型名称为 `MotionPosteriorNet`。`TrackNetV2`、`TrackNetV5` 和
+`TrackNetMotion` 继续作为兼容名称保留，用于已有脚本和权重；仓库目录与历史论文引用不做破坏性改名。
 
 TrackNetV5 的核心架构与算法逻辑基于公司最新研究成果：
 - 论文标题: TrackNetV5: Residual-Driven Spatio-Temporal Refinement and Motion Direction Decoupling for Fast Object Tracking
@@ -8,7 +11,7 @@ TrackNetV5 的核心架构与算法逻辑基于公司最新研究成果：
 
 ## 核心规格
 
-* **架构支持**：支持 TrackNetV5、V2，以及新的 `TrackNetMotion` 三帧/五帧路径；未完成注册的 V4 不作为公开推理选项。
+* **架构支持**：支持公开的 `MotionPosteriorNet` 三帧/五帧路径，同时兼容 TrackNetV5、V2 和 `TrackNetMotion`；未完成注册的 V4 不作为公开推理选项。
 * **功能集成**：封装了可配置的三帧/五帧时序推理、高斯热力图质心提取、轨迹增强可视化及训练流水线。
 * **保密声明**：模型权重与训练数据集属于公司内部核心资产，暂不公开。
 
@@ -99,7 +102,7 @@ python train.py
 
 ```bash
 python track.py <input_dir> <weights_path> \
-  --arch v5 \
+  --arch motion_posterior5 \
   --output-dir <trajectory_csv_dir> \
   --threshold 0.5 \
   --device cuda:0
@@ -143,9 +146,9 @@ benchmark_id,video_name,frame_number,detected,x_512,y_288,x_orig,y_orig,conf,fps
 
 本仓库的工程设计模式、模型细节及底层逻辑已整理至专属的 **Obsidian 可视化知识库**。
 
-### TrackNetMotion 升级架构
+### MotionPosterior 升级架构
 
-新增的 `TrackNetMotion` 独立于 V2/V5，因此不会改变已有权重的 state-dict 和三帧接口。它支持：
+公开的 `MotionPosteriorNet` 与 `TrackNetMotion` 使用相同的模块布局，因此不会改变已有权重的 state-dict 和旧三帧接口。它支持：
 
 * 输入 `[B, 9, H, W]`（三帧）或 `[B, 15, H, W]`（五帧）；
 * 输出与输入帧数相同的全分辨率热力图；
@@ -160,7 +163,7 @@ benchmark_id,video_name,frame_number,detected,x_512,y_288,x_orig,y_orig,conf,fps
 python tools/preprocess_data_gauss.py --input_dir <raw> --output_dir <data> \
   --mode context --num-frames 5 --train_rate 0.8
 python train.py  # 选择 configs/tracknetmotion_convnext_5frames.py
-python track.py <input_dir> <weights_path> --arch motion5 \
+python track.py <input_dir> <weights_path> --arch motion_posterior5 \
   --output-dir <trajectory_csv_dir> --threshold 0.5 --device cuda:0
 ```
 
@@ -168,7 +171,7 @@ python track.py <input_dir> <weights_path> --arch motion5 \
 `configs/tracknetmotion_convnext_5frames_causal.py`；该版本输入为
 `[t-4,t-3,t-2,t-1,t]`，不会读未来帧。
 
-`motion3/motion5` 默认使用 `chunk`，每个窗口输入/输出帧数一致；需要中心滑动或实时因果评估时分别使用 `--window-mode center` / `--window-mode causal`。训练保存完整 checkpoint（模型、优化器、调度器和进度），配置 `resume_from` 可续训。
+`motion_posterior3/motion_posterior5` 默认使用 `chunk`，每个窗口输入/输出帧数一致；旧的 `motion3/motion5` 别名行为相同。需要中心滑动或实时因果评估时分别使用 `--window-mode center` / `--window-mode causal`。训练保存完整 checkpoint（模型、优化器、调度器和进度），配置 `resume_from` 可续训。
 
 完整设计取舍、边界条件与顶会文献链接见 [`docs/模型升级方案.md`](docs/模型升级方案.md)。
 

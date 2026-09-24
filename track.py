@@ -56,6 +56,19 @@ MODEL_CONFIGS = {
         type='TrackNetMotion', num_frames=5, return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
     ),
+    # Canonical public names. Legacy ``motion*`` keys remain supported.
+    'motion_posterior3': dict(
+        type='MotionPosteriorNet', num_frames=3, return_aux=True,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
+    ),
+    'motion_posterior5': dict(
+        type='MotionPosteriorNet', num_frames=5, return_aux=True,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
+    ),
+    'motion_posterior5_causal': dict(
+        type='MotionPosteriorNet', num_frames=5, return_aux=True,
+        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
+    ),
 }
 
 INPUT_HEIGHT = 288
@@ -286,7 +299,7 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
             # Keep the T-frame input/output contract by default. Center and
             # causal modes are explicit single-frame sliding alternatives.
             window_mode = 'chunk'
-        if getattr(args, 'arch', '') == 'motion5_causal':
+        if getattr(args, 'arch', '').endswith('5_causal'):
             window_mode = 'causal'
         if window_mode in ('center', 'causal'):
             for frames, output_position, frame_number in iter_sliding_windows(cap, num_frames, window_mode):
@@ -349,7 +362,7 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
 
 # --- 4. “总调度室”: ✨ main (✨ 已修改) ✨ ---
 def build_parser():
-    parser = argparse.ArgumentParser(description="TrackNet Batch Inference Pipeline")
+    parser = argparse.ArgumentParser(description="MotionPosterior batch video inference pipeline")
     parser.add_argument('input_dir', type=str, help='Path to the directory containing input videos.')
     parser.add_argument('weights_path', type=str, help='Path to the model weights (.pth file).')
     
@@ -359,7 +372,7 @@ def build_parser():
         type=str, 
         required=True, 
         choices=sorted(MODEL_CONFIGS),
-        help='Model architecture. motion3/motion5 provide configurable temporal windows.'
+        help='Canonical aliases: motion_posterior3/5; legacy motion3/5 remain supported.'
     )
     
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for inference (e.g., "cuda:0" or "cpu").')
@@ -421,7 +434,7 @@ def main():
     print(f"Found {len(video_files)} videos to process.")
 
     model_cfg = MODEL_CONFIGS[args.arch]
-    print(f"🚀 Starting Batch Inference Pipeline for [TrackNet {args.arch.upper()}]...")
+    print(f"🚀 Starting MotionPosterior batch inference for [{args.arch.upper()}]...")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     model = build_model(model_cfg)
     _load_model_weights(model, weights_path, device='cpu')

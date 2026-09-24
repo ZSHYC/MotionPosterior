@@ -94,3 +94,14 @@ class TrackNetMotion(nn.Module):
         """Return only heatmaps for deployment code using the rich model."""
         output = self.forward(x)
         return output["heatmap"] if isinstance(output, dict) else output
+
+
+@MODELS.register_module
+class MotionPosteriorNet(TrackNetMotion):
+    """Public name for the motion-aware posterior tracking model.
+
+    The inheritance is deliberate: the module layout and state-dict keys stay
+    identical to ``TrackNetMotion`` so existing checkpoints remain loadable.
+    """
+
+    pass

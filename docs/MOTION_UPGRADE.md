@@ -1,4 +1,9 @@
-# Motion upgrade contract
+# MotionPosterior motion contract
+
+`MotionPosteriorNet` is the public name of the upgraded motion-aware model. The
+legacy `TrackNetMotion` name remains registered so old configs and checkpoints
+continue to work. The current dataset is tennis-ball tracking, while the contract
+itself describes generic tiny moving point targets.
 
 This repository supports three distinct temporal protocols:
 
@@ -12,7 +17,7 @@ with a center-only model.
 
 ## Output and supervision
 
-`TrackNetMotion(return_aux=True)` emits a heatmap plus normalized center,
+`MotionPosteriorNet(return_aux=True)` emits a heatmap plus normalized center,
 visibility, uncertainty, velocity, and acceleration heads. The upgraded loss
 uses batch `coords` and `visibility` when available. Coordinates can be pixel
 coordinates or normalized coordinates; pixel values are normalized using the

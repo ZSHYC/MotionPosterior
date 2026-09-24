@@ -1,4 +1,7 @@
-"""Three-frame TrackNetMotion configuration for an apples-to-apples V5 upgrade."""
+"""Three-frame MotionPosterior training configuration.
+
+The filename is kept for compatibility with existing training commands.
+"""
 
 from pathlib import Path
 
@@ -10,7 +13,7 @@ frame_keys = ['path_prev', 'path', 'path_next']
 target_keys = ['gt_path_prev', 'gt_path', 'gt_path_next']
 
 model = dict(
-    type='TrackNetMotion',
+    type='MotionPosteriorNet',
     num_frames=num_frames,
     return_aux=True,
     backbone=dict(type='MotionConvNeXtBackbone', num_frames=num_frames),

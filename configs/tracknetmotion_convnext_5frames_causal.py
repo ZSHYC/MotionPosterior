@@ -1,4 +1,7 @@
-"""Five-frame causal TrackNetMotion training configuration."""
+"""Five-frame causal MotionPosterior training configuration.
+
+The filename is kept for compatibility with existing training commands.
+"""
 
 from pathlib import Path
 
@@ -10,7 +13,7 @@ frame_keys = ['path_prev4', 'path_prev3', 'path_prev2', 'path_prev', 'path']
 target_keys = ['gt_path_prev4', 'gt_path_prev3', 'gt_path_prev2', 'gt_path_prev', 'gt_path']
 
 model = dict(
-    type='TrackNetMotion', num_frames=num_frames, return_aux=True,
+    type='MotionPosteriorNet', num_frames=num_frames, return_aux=True,
     backbone=dict(type='MotionConvNeXtBackbone', num_frames=num_frames),
 )
 

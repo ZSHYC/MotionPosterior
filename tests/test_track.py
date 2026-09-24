@@ -175,6 +175,21 @@ def test_cli_requires_canonical_output_directory():
     assert args.visualization_dir is None
 
 
+def test_cli_accepts_public_motionposterior_architecture():
+    parser = track.build_parser()
+    args = parser.parse_args([
+        "videos",
+        "weights.pth",
+        "--arch",
+        "motion_posterior5",
+        "--output-dir",
+        "tracks",
+    ])
+    assert args.arch == "motion_posterior5"
+    assert track.MODEL_CONFIGS[args.arch]["type"] == "MotionPosteriorNet"
+    assert CORE_MODEL_CONFIGS[args.arch]["type"] == "MotionPosteriorNet"
+
+
 def test_cli_does_not_advertise_broken_v4_architecture():
     parser = track.build_parser()
 

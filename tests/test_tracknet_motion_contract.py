@@ -1,6 +1,7 @@
 import torch
 
-from models_factory.models.tracknet_motion import TrackNetMotion
+from models_factory.builder import build_model
+from models_factory.models.tracknet_motion import MotionPosteriorNet, TrackNetMotion
 from core.postprocess import decode_prediction
 
 
@@ -26,3 +27,25 @@ def test_motion_model_rich_output_and_decoder_contract():
     # Decoder must accept the actual batched rich output used by deployment.
     point = decode_prediction(prediction, frame_index=1, threshold=0.0)
     assert point is None or len(point) == 3
+
+
+def test_public_motionposterior_alias_keeps_legacy_module_contract():
+    config = {
+        "type": "MotionPosteriorNet",
+        "num_frames": 3,
+        "return_aux": True,
+        "backbone": {
+            "type": "MotionConvNeXtBackbone",
+            "num_frames": 3,
+            "dims": (8, 12, 16),
+            "depths": (1, 1, 1),
+        },
+    }
+    model = build_model(config)
+    assert isinstance(model, MotionPosteriorNet)
+    assert isinstance(model, TrackNetMotion)
+    assert list(model.state_dict()) == list(TrackNetMotion(
+        num_frames=3,
+        return_aux=True,
+        backbone=config["backbone"],
+    ).state_dict())

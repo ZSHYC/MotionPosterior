@@ -1,8 +1,12 @@
-# TrackNetV5 SDK Documentation
+# MotionPosterior
 
 **[中文版 (Chinese Version)](README_CN.md)**
 
-This repository is the official Software Development Kit (SDK) for **TrackNetV5**, providing a standardized engineering implementation of the tennis ball tracking algorithm. Developed and maintained by **Shanghai Code Zero Sports Technology Co., Ltd.**
+This repository is the official SDK for **MotionPosterior**, a motion-aware posterior estimation framework for tiny, fast-moving point targets. The current benchmark is tennis-ball tracking, but the public architecture is not limited to rally or sports footage. Developed and maintained by **Shanghai Code Zero Sports Technology Co., Ltd.**
+
+`MotionPosteriorNet` is the canonical model name. `TrackNetV2`, `TrackNetV5`, and
+`TrackNetMotion` remain available as compatibility names for existing scripts and
+checkpoints; the repository directory and historical paper references are kept intact.
 
 The core architecture and algorithmic logic of TrackNetV5 are based on our latest research:
 
@@ -11,7 +15,7 @@ The core architecture and algorithmic logic of TrackNetV5 are based on our lates
 
 ## Core Specifications
 
-* **Architecture Support**: Supports TrackNetV5, V2, and the new `TrackNetMotion` (3/5-frame) path. The unregistered V4 implementation is not exposed as an inference option.
+* **Architecture Support**: Supports the public `MotionPosteriorNet` 3/5-frame paths, plus legacy TrackNetV5, V2, and `TrackNetMotion` aliases. The unregistered V4 implementation is not exposed as an inference option.
 * **Integrated Features**: Encapsulates configurable three- or five-frame inference, Gaussian heatmap centroid extraction, trajectory enhancement visualization, and an industrial-grade training pipeline.
 * **Confidentiality Notice**: Model weights and training datasets are proprietary assets of the company and are currently not open to the public.
 
@@ -104,7 +108,7 @@ The inference module supports batch video processing and structured data export.
 
 ```bash
 python track.py <input_dir> <weights_path> \
-  --arch v5 \
+  --arch motion_posterior5 \
   --output-dir <trajectory_csv_dir> \
   --threshold 0.5 \
   --device cuda:0
@@ -143,10 +147,11 @@ The upgrade deliberately avoids optical flow, deformable convolution, and new de
 
 The engineering design patterns, TrackNetV5 model details, and underlying inference logic are documented in our exclusive **Obsidian Visual Knowledge Base**.
 
-### TrackNetMotion upgrade (new)
+### MotionPosterior architecture
 
-`TrackNetMotion` is a separate architecture so existing V2/V5 checkpoints keep their
-state-dict and three-frame contracts. It accepts either `[B, 9, H, W]` or
+`MotionPosteriorNet` is the public name for the motion-aware architecture. It keeps the
+same module layout as `TrackNetMotion`, so existing V2/V5/TrackNetMotion checkpoints
+remain loadable through their compatibility paths. It accepts either `[B, 9, H, W]` or
 `[B, 15, H, W]` and returns the same number of full-resolution heatmaps:
 
 ```bash
@@ -156,7 +161,7 @@ python tools/preprocess_data_gauss.py --input_dir <raw> --output_dir <data> \
 python train.py  # select configs/tracknetmotion_convnext_5frames.py
 
 # Five-frame inference
-python track.py <input_dir> <weights_path> --arch motion5 \
+python track.py <input_dir> <weights_path> --arch motion_posterior5 \
   --output-dir <trajectory_csv_dir> --threshold 0.5 --device cuda:0
 ```
 
@@ -164,8 +169,8 @@ For an online five-frame model, preprocess with `--window-type causal` and use
 `configs/tracknetmotion_convnext_5frames_causal.py`; its input is
 `[t-4,t-3,t-2,t-1,t]` and never includes future frames.
 
-`motion3` and `motion5` default to `chunk`, preserving equal T-frame input/output
-windows. Use `--window-mode center` for centered sliding evaluation or
+`motion_posterior3` and `motion_posterior5` default to `chunk`, preserving equal T-frame input/output
+windows. The legacy `motion3` and `motion5` aliases behave identically. Use `--window-mode center` for centered sliding evaluation or
 `--window-mode causal` for online inference. Training checkpoints include model,
 optimizer, scheduler, and progress state; set `resume_from` to continue.
 
