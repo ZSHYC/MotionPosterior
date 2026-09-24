@@ -6,8 +6,8 @@ from ..builder import MODELS, build_backbone
 
 
 @MODELS.register_module
-class TrackNetMotion(nn.Module):
-    """Multi-frame motion-aware detector (3 or 5 RGB frames).
+class MotionPosteriorNet(nn.Module):
+    """Motion-aware posterior detector for 3 or 5 RGB frames.
 
     ``return_aux=False`` keeps the original heatmap tensor contract for old
     callers.  The richer output mode exposes centre offsets, visibility and
@@ -17,7 +17,7 @@ class TrackNetMotion(nn.Module):
     def __init__(self, backbone=None, num_frames=3, return_aux=False):
         super().__init__()
         if num_frames not in (3, 5):
-            raise ValueError("TrackNetMotion supports num_frames=3 or 5")
+            raise ValueError("MotionPosteriorNet supports num_frames=3 or 5")
         backbone = dict(backbone or {"type": "MotionConvNeXtBackbone"})
         if "num_frames" in backbone and backbone["num_frames"] != num_frames:
             raise ValueError(
@@ -94,14 +94,3 @@ class TrackNetMotion(nn.Module):
         """Return only heatmaps for deployment code using the rich model."""
         output = self.forward(x)
         return output["heatmap"] if isinstance(output, dict) else output
-
-
-@MODELS.register_module
-class MotionPosteriorNet(TrackNetMotion):
-    """Public name for the motion-aware posterior tracking model.
-
-    The inheritance is deliberate: the module layout and state-dict keys stay
-    identical to ``TrackNetMotion`` so existing checkpoints remain loadable.
-    """
-
-    pass

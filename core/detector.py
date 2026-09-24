@@ -32,22 +32,6 @@ MODEL_CONFIGS = {
             use_motion_tokens=True,
         )
     ),
-    'motion3': dict(
-        type='TrackNetMotion',
-        num_frames=3,
-        return_aux=True,
-        backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
-    ),
-    'motion5': dict(
-        type='TrackNetMotion',
-        num_frames=5,
-        return_aux=True,
-        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
-    ),
-    'motion5_causal': dict(
-        type='TrackNetMotion', num_frames=5, return_aux=True,
-        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
-    ),
     'motion_posterior3': dict(
         type='MotionPosteriorNet', num_frames=3, return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
@@ -66,13 +50,13 @@ class TrackNetDetector:
     def __init__(self, arch, weights_path, device='cuda:0', threshold=0.5, window_mode=None):
         """
         Stage 1: 检测器
-        :param arch: 架构版本（包括公开的 motion_posterior3/5，以及旧别名）
+        :param arch: MotionPosterior temporal variant (3-frame, 5-frame, or causal 5-frame)
         :param weights_path: .pth 权重文件路径
         :param device: 设备 (如 'cuda:0' 或 'cpu')
         :param threshold: 热力图激活阈值
         """
         self.threshold = float(threshold)
-        self.window_mode = window_mode or ('causal' if arch.endswith('5_causal') else 'chunk')
+        self.window_mode = window_mode or ('causal' if arch == 'motion_posterior5_causal' else 'chunk')
         if not math.isfinite(self.threshold) or not 0 <= self.threshold < 1:
             raise ValueError(f"threshold must be a finite value in [0, 1), got {threshold}")
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")

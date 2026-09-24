@@ -38,25 +38,7 @@ MODEL_CONFIGS = {
             use_motion_tokens=True,
         )
     ),
-    # Motion-aware ConvNeXt-style model.  ``motion3`` preserves the usual
-    # three-frame contract; ``motion5`` is the symmetric five-frame option.
-    'motion3': dict(
-        type='TrackNetMotion',
-        num_frames=3,
-        return_aux=True,
-        backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
-    ),
-    'motion5': dict(
-        type='TrackNetMotion',
-        num_frames=5,
-        return_aux=True,
-        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
-    ),
-    'motion5_causal': dict(
-        type='TrackNetMotion', num_frames=5, return_aux=True,
-        backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
-    ),
-    # Canonical public names. Legacy ``motion*`` keys remain supported.
+    # MotionPosterior supports symmetric and causal five-frame windows.
     'motion_posterior3': dict(
         type='MotionPosteriorNet', num_frames=3, return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
@@ -299,7 +281,7 @@ def process_video(video_path: Path, model, device, args, output_root_dir: Path) 
             # Keep the T-frame input/output contract by default. Center and
             # causal modes are explicit single-frame sliding alternatives.
             window_mode = 'chunk'
-        if getattr(args, 'arch', '').endswith('5_causal'):
+        if getattr(args, 'arch', '') == 'motion_posterior5_causal':
             window_mode = 'causal'
         if window_mode in ('center', 'causal'):
             for frames, output_position, frame_number in iter_sliding_windows(cap, num_frames, window_mode):
@@ -372,7 +354,7 @@ def build_parser():
         type=str, 
         required=True, 
         choices=sorted(MODEL_CONFIGS),
-        help='Canonical aliases: motion_posterior3/5; legacy motion3/5 remain supported.'
+        help='MotionPosterior architecture and temporal window selection.'
     )
     
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for inference (e.g., "cuda:0" or "cpu").')

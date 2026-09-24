@@ -4,9 +4,8 @@
 
 This repository is the official SDK for **MotionPosterior**, a motion-aware posterior estimation framework for tiny, fast-moving point targets. The current benchmark is tennis-ball tracking, but the public architecture is not limited to rally or sports footage. Developed and maintained by **Shanghai Code Zero Sports Technology Co., Ltd.**
 
-`MotionPosteriorNet` is the canonical model name. `TrackNetV2`, `TrackNetV5`, and
-`TrackNetMotion` remain available as compatibility names for existing scripts and
-checkpoints; the repository directory and historical paper references are kept intact.
+`MotionPosteriorNet` is the final model name. `TrackNetV2` and `TrackNetV5` remain
+available as historical baselines for existing scripts and checkpoints.
 
 The core architecture and algorithmic logic of TrackNetV5 are based on our latest research:
 
@@ -15,7 +14,7 @@ The core architecture and algorithmic logic of TrackNetV5 are based on our lates
 
 ## Core Specifications
 
-* **Architecture Support**: Supports the public `MotionPosteriorNet` 3/5-frame paths, plus legacy TrackNetV5, V2, and `TrackNetMotion` aliases. The unregistered V4 implementation is not exposed as an inference option.
+* **Architecture Support**: Supports the public `MotionPosteriorNet` 3/5-frame paths, plus legacy TrackNetV5 and V2 baselines. The unregistered V4 implementation is not exposed as an inference option.
 * **Integrated Features**: Encapsulates configurable three- or five-frame inference, Gaussian heatmap centroid extraction, trajectory enhancement visualization, and an industrial-grade training pipeline.
 * **Confidentiality Notice**: Model weights and training datasets are proprietary assets of the company and are currently not open to the public.
 
@@ -149,16 +148,14 @@ The engineering design patterns, TrackNetV5 model details, and underlying infere
 
 ### MotionPosterior architecture
 
-`MotionPosteriorNet` is the public name for the motion-aware architecture. It keeps the
-same module layout as `TrackNetMotion`, so existing V2/V5/TrackNetMotion checkpoints
-remain loadable through their compatibility paths. It accepts either `[B, 9, H, W]` or
+`MotionPosteriorNet` is the final motion-aware architecture. It accepts either `[B, 9, H, W]` or
 `[B, 15, H, W]` and returns the same number of full-resolution heatmaps:
 
 ```bash
 # Five-frame preprocessing and training configuration
 python tools/preprocess_data_gauss.py --input_dir <raw> --output_dir <data> \
   --mode context --num-frames 5 --train_rate 0.8
-python train.py  # select configs/tracknetmotion_convnext_5frames.py
+python train.py  # select configs/motionposterior_convnext_5frames.py
 
 # Five-frame inference
 python track.py <input_dir> <weights_path> --arch motion_posterior5 \
@@ -166,11 +163,11 @@ python track.py <input_dir> <weights_path> --arch motion_posterior5 \
 ```
 
 For an online five-frame model, preprocess with `--window-type causal` and use
-`configs/tracknetmotion_convnext_5frames_causal.py`; its input is
+`configs/motionposterior_convnext_5frames_causal.py`; its input is
 `[t-4,t-3,t-2,t-1,t]` and never includes future frames.
 
 `motion_posterior3` and `motion_posterior5` default to `chunk`, preserving equal T-frame input/output
-windows. The legacy `motion3` and `motion5` aliases behave identically. Use `--window-mode center` for centered sliding evaluation or
+windows. Use `--window-mode center` for centered sliding evaluation or
 `--window-mode causal` for online inference. Training checkpoints include model,
 optimizer, scheduler, and progress state; set `resume_from` to continue.
 

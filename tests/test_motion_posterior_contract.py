@@ -1,12 +1,12 @@
 import torch
 
 from models_factory.builder import build_model
-from models_factory.models.tracknet_motion import MotionPosteriorNet, TrackNetMotion
+from models_factory.models.motion_posterior import MotionPosteriorNet
 from core.postprocess import decode_prediction
 
 
 def test_motion_model_rich_output_and_decoder_contract():
-    model = TrackNetMotion(
+    model = MotionPosteriorNet(
         num_frames=3,
         return_aux=True,
         backbone=dict(
@@ -29,7 +29,7 @@ def test_motion_model_rich_output_and_decoder_contract():
     assert point is None or len(point) == 3
 
 
-def test_public_motionposterior_alias_keeps_legacy_module_contract():
+def test_public_motionposterior_registry_contract():
     config = {
         "type": "MotionPosteriorNet",
         "num_frames": 3,
@@ -43,9 +43,4 @@ def test_public_motionposterior_alias_keeps_legacy_module_contract():
     }
     model = build_model(config)
     assert isinstance(model, MotionPosteriorNet)
-    assert isinstance(model, TrackNetMotion)
-    assert list(model.state_dict()) == list(TrackNetMotion(
-        num_frames=3,
-        return_aux=True,
-        backbone=config["backbone"],
-    ).state_dict())
+    assert model.num_frames == 3
