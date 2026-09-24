@@ -180,7 +180,7 @@ python track.py <input_dir> <weights_path> --arch motion_posterior5 \
 
 `motion_posterior3/motion_posterior5` 默认使用 `chunk`，每个窗口输入/输出帧数一致。需要中心滑动或实时因果评估时分别使用 `--window-mode center` / `--window-mode causal`。训练保存完整 checkpoint（模型、优化器、调度器和进度），配置 `resume_from` 可续训。
 
-完整设计取舍、边界条件与顶会文献链接见 [`docs/模型升级方案.md`](docs/模型升级方案.md)。
+完整设计取舍、边界条件与顶会文献链接见 [`docs/MotionPosterior.md`](docs/MotionPosterior.md)。
 
 > [!IMPORTANT]
 > **获取途径**：该 Obsidian 仓库属于非公开资源。如有深度开发、架构学习或技术交流需求，请通过 **Email** 联系作者申请授权。

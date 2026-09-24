@@ -184,7 +184,7 @@ The new backbone is a ConvNeXt V2-inspired hierarchical encoder with GRN,
 full/half/quarter/eighth-resolution features. At half, quarter, and eighth scales it
 estimates bounded global translation, performs 3x3 spatial-temporal correlation,
 and applies dense offset refinement with valid temporal masks. It does not require
-an optical-flow dependency. The quarter and half scales preserve tiny-ball detail. See [`docs/模型升级方案.md`](docs/模型升级方案.md) for the design rationale,
+an optical-flow dependency. The quarter and half scales preserve tiny-ball detail. See [`docs/MotionPosterior.md`](docs/MotionPosterior.md) for the design rationale,
 constraints, and literature links.
 
 > [!IMPORTANT]
