@@ -10,18 +10,18 @@ class TrackNetV2Neck(nn.Module):
     def __init__(self):
         super().__init__()
         # --- Decoder Layers ---
-        self.ups1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.ups1 = nn.Upsample(scale_factor=2, mode='nearest')
         # 输入通道: bottleneck(512) + skip3(256) = 768
         self.conv11 = ConvBlock(512 + 256, 256)
         self.conv12 = ConvBlock(256, 256)
         self.conv13 = ConvBlock(256, 256)
 
-        self.ups2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.ups2 = nn.Upsample(scale_factor=2, mode='nearest')
         # 输入通道: 上一层输出(256) + skip2(128) = 384
         self.conv14 = ConvBlock(256 + 128, 128)
         self.conv15 = ConvBlock(128, 128)
 
-        self.ups3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.ups3 = nn.Upsample(scale_factor=2, mode='nearest')
         # 输入通道: 上一层输出(128) + skip1(64) = 192
         self.conv16 = ConvBlock(128 + 64, 64)
         self.conv17 = ConvBlock(64, 64)

@@ -11,7 +11,7 @@ class HeadConvBlock(nn.Module):
                 in_channels,
                 out_channels,
                 kernel_size=1, 
-                bias=False  # 使用 BatchNorm 时，卷积层的偏置(bias)是多余的，可以省略
+                bias=True
             ),
             nn.Sigmoid()  # 变为sigmoid用于wbce损失
         )

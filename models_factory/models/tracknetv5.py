@@ -7,6 +7,7 @@ from ..basic import MDD
 class TrackNetV5(nn.Module):
     def __init__(self, backbone, neck, head):
         super().__init__()
+        self.num_frames = 3
         self.mdd = MDD()
         self.backbone = build_backbone(backbone)
         self.neck = build_neck(neck)

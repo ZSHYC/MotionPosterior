@@ -190,18 +190,18 @@ def test_cli_accepts_public_motionposterior_architecture():
     assert CORE_MODEL_CONFIGS[args.arch]["type"] == "MotionPosteriorNet"
 
 
-def test_cli_does_not_advertise_broken_v4_architecture():
+@pytest.mark.parametrize("arch", ["v3", "v4", "v4_typea", "v4_typeb"])
+def test_cli_accepts_official_baseline_architectures(arch):
     parser = track.build_parser()
-
-    with pytest.raises(SystemExit):
-        parser.parse_args([
-            "videos",
-            "weights.pth",
-            "--arch",
-            "v4",
-            "--output-dir",
-            "tracks",
-        ])
+    args = parser.parse_args([
+        "videos",
+        "weights.pth",
+        "--arch",
+        arch,
+        "--output-dir",
+        "tracks",
+    ])
+    assert args.arch == arch
 
 
 def test_legacy_infer_entrypoint_uses_canonical_track_cli():
@@ -280,8 +280,8 @@ def test_core_detector_keeps_tail_frames_and_returns_original_coordinates(
     assert detector.model.calls == 2
 
 
-def test_core_detector_rejects_broken_v4_and_invalid_threshold(monkeypatch):
-    assert "v4" not in CORE_MODEL_CONFIGS
+def test_core_detector_exposes_official_baselines_and_rejects_invalid_threshold(monkeypatch):
+    assert {"v2", "v3", "v4", "v4_typea", "v4_typeb", "v5"} <= set(CORE_MODEL_CONFIGS)
     monkeypatch.setattr(
         detector_module,
         "build_model",

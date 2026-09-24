@@ -38,6 +38,25 @@ MODEL_CONFIGS = {
             use_motion_tokens=True,
         )
     ),
+    'v3': dict(type='TrackNetV3', in_dim=9, out_dim=3, num_frames=3),
+    'v4': dict(
+        type='TrackNetV4',
+        backbone=dict(type='TrackNetV4Backbone', in_channels=9),
+        neck=dict(type='TrackNetV4Neck'),
+        head=dict(type='TrackNetV4Head', in_channels=64, out_channels=3, fusion_type='A'),
+    ),
+    'v4_typea': dict(
+        type='TrackNetV4',
+        backbone=dict(type='TrackNetV4Backbone', in_channels=9),
+        neck=dict(type='TrackNetV4Neck'),
+        head=dict(type='TrackNetV4Head', in_channels=64, out_channels=3, fusion_type='A'),
+    ),
+    'v4_typeb': dict(
+        type='TrackNetV4',
+        backbone=dict(type='TrackNetV4Backbone', in_channels=9),
+        neck=dict(type='TrackNetV4Neck'),
+        head=dict(type='TrackNetV4Head', in_channels=64, out_channels=3, fusion_type='B'),
+    ),
     # MotionPosterior supports symmetric and causal five-frame windows.
     'motion_posterior3': dict(
         type='MotionPosteriorNet', num_frames=3, return_aux=True,

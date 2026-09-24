@@ -14,7 +14,7 @@ The core architecture and algorithmic logic of TrackNetV5 are based on our lates
 
 ## Core Specifications
 
-* **Architecture Support**: Supports the public `MotionPosteriorNet` 3/5-frame paths, plus legacy TrackNetV5 and V2 baselines. The unregistered V4 implementation is not exposed as an inference option.
+* **Architecture Support**: Supports the public `MotionPosteriorNet` 3/5-frame paths, plus TrackNetV2, official TrackNetV3, and PyTorch TrackNetV4 TypeA/TypeB and TrackNetV5 baselines.
 * **Integrated Features**: Encapsulates configurable three- or five-frame inference, Gaussian heatmap centroid extraction, trajectory enhancement visualization, and an industrial-grade training pipeline.
 * **Confidentiality Notice**: Model weights and training datasets are proprietary assets of the company and are currently not open to the public.
 
@@ -134,6 +134,15 @@ Visualization videos are disabled by default. Add
 ---
 
 ## 5. Architecture Deep-Dive & Resources
+
+### Recovered open-source baselines
+
+The inference choices include `v2`, official `v3`, `v4`/`v4_typea`, `v4_typeb`, and
+the project `v5` baseline. V3 also registers its separate `InpaintNetV3` trajectory
+rectifier. V4 TypeA and TypeB are PyTorch implementations of the official
+[TrackNetV4 repository](https://github.com/TrackNetV4/TrackNetV4); TensorFlow is not a
+runtime dependency. These baselines are structural smoke-test targets and still need
+their matching checkpoints and a common evaluation split for accuracy claims.
 
 ### Motion-aware V5 upgrade
 

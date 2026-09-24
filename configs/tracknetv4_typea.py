@@ -1,6 +1,4 @@
-"""
-config for tracknetv5 with b2e30 and adamw lr1e-4
-"""
+"""Official TrackNetV4 TypeA PyTorch baseline configuration."""
 
 from pathlib import Path
 
@@ -15,9 +13,10 @@ model = dict(
         type='TrackNetV4Neck'
     ),
     head=dict(
-        type='TrackNetV2Head',
+        type='TrackNetV4Head',
         in_channels=64,
-        out_channels=3
+        out_channels=3,
+        fusion_type='A',
     )
 )
 

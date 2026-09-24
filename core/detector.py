@@ -32,6 +32,25 @@ MODEL_CONFIGS = {
             use_motion_tokens=True,
         )
     ),
+    'v3': dict(type='TrackNetV3', in_dim=9, out_dim=3, num_frames=3),
+    'v4': dict(
+        type='TrackNetV4',
+        backbone=dict(type='TrackNetV4Backbone', in_channels=9),
+        neck=dict(type='TrackNetV4Neck'),
+        head=dict(type='TrackNetV4Head', in_channels=64, out_channels=3, fusion_type='A'),
+    ),
+    'v4_typea': dict(
+        type='TrackNetV4',
+        backbone=dict(type='TrackNetV4Backbone', in_channels=9),
+        neck=dict(type='TrackNetV4Neck'),
+        head=dict(type='TrackNetV4Head', in_channels=64, out_channels=3, fusion_type='A'),
+    ),
+    'v4_typeb': dict(
+        type='TrackNetV4',
+        backbone=dict(type='TrackNetV4Backbone', in_channels=9),
+        neck=dict(type='TrackNetV4Neck'),
+        head=dict(type='TrackNetV4Head', in_channels=64, out_channels=3, fusion_type='B'),
+    ),
     'motion_posterior3': dict(
         type='MotionPosteriorNet', num_frames=3, return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
@@ -50,7 +69,7 @@ class TrackNetDetector:
     def __init__(self, arch, weights_path, device='cuda:0', threshold=0.5, window_mode=None):
         """
         Stage 1: 检测器
-        :param arch: MotionPosterior temporal variant (3-frame, 5-frame, or causal 5-frame)
+        :param arch: baseline or MotionPosterior architecture variant
         :param weights_path: .pth 权重文件路径
         :param device: 设备 (如 'cuda:0' 或 'cpu')
         :param threshold: 热力图激活阈值

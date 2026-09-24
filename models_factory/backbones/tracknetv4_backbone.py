@@ -15,7 +15,7 @@ def power_normalization(input, a, b):
 
 class MotionPromptLayer(nn.Module):
 
-    def __init__(self, penalty_weight=0.0):
+    def __init__(self, penalty_weight=0.0, input_scale=0.225, input_bias=0.45):
         super(MotionPromptLayer, self).__init__()
         # Default configs
         self.input_color_order = "RGB"
@@ -28,6 +28,8 @@ class MotionPromptLayer(nn.Module):
 
         # Temporal attention variation regularization parameter
         self.lambda1 = penalty_weight
+        self.input_scale = float(input_scale)
+        self.input_bias = float(input_bias)
 
     def forward(self, video_seq):
         # Initialize loss
@@ -39,7 +41,8 @@ class MotionPromptLayer(nn.Module):
             raise ValueError(f"Expected input channels=9 (3 frames × 3 RGB channels), but got {C}")
 
         # Reshape back to video sequence format
-        norm_seq = video_seq.view(B, 3, 3, H, W)  # [B, T=3, C=3, H, W]
+        norm_seq = video_seq.view(B, 3, 3, H, W)
+        norm_seq = norm_seq * self.input_scale + self.input_bias
 
         # Transfer to grayscale
         idx_list = [self.color_map[idx] for idx in self.input_color_order]

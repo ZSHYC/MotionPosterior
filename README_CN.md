@@ -10,7 +10,7 @@ TrackNetV5 的核心架构与算法逻辑基于公司最新研究成果：
 
 ## 核心规格
 
-* **架构支持**：支持公开的 `MotionPosteriorNet` 三帧/五帧路径，同时保留 TrackNetV5、V2 历史基线；未完成注册的 V4 不作为公开推理选项。
+* **架构支持**：支持公开的 `MotionPosteriorNet` 三帧/五帧路径，同时提供 TrackNetV2、官方 TrackNetV3、PyTorch 版 TrackNetV4 TypeA/TypeB 和 TrackNetV5 基线。
 * **功能集成**：封装了可配置的三帧/五帧时序推理、高斯热力图质心提取、轨迹增强可视化及训练流水线。
 * **保密声明**：模型权重与训练数据集属于公司内部核心资产，暂不公开。
 
@@ -126,6 +126,14 @@ benchmark_id,video_name,frame_number,detected,x_512,y_288,x_orig,y_orig,conf,fps
 ---
 
 ## 5. 架构讲解与资源获取
+
+### 已恢复的开源基线
+
+推理入口包含 `v2`、官方 `v3`、`v4`/`v4_typea`、`v4_typeb` 以及本项目的 `v5` 基线。
+V3 另外注册了独立的 `InpaintNetV3` 轨迹修正器。V4 TypeA/TypeB 根据官方
+[TrackNetV4 仓库](https://github.com/TrackNetV4/TrackNetV4) 的结构用 PyTorch 重写，
+不引入 TensorFlow 运行依赖。当前基线已通过结构和前向 smoke test；要比较精度仍需
+分别加载匹配权重，并使用统一数据划分、阈值和指标。
 
 ### V5 motion-aware 升级
 
