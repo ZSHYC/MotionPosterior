@@ -8,32 +8,13 @@
 
 ## 摘要
 
-TrackNetV5 通过带符号的运动方向信息和残差式时空精修实现高速目标跟踪。MotionPosterior 在此基础上，将以图像差分为主的时序交互升级为特征级时序配准与局部对应。分层 ConvNeXt V2 风格编码器在四个尺度提取高分辨率与上下文特征；置信度门控的全局平移补偿、速度条件局部相关和 dense offset 精修共同构成运动表示。解码器同时预测热力图后验、中心偏移、可见性、定位不确定度、速度和加速度，并为每个输入帧保留 dense 输出。
+TrackNetV5 通过带符号的运动方向信息和残差式时空精修实现高速目标跟踪。MotionPosterior 在此基础上，将以图像差分为主的时序交互升级为特征级时序配准与局部对应。分层 ConvNeXt V2 风格编码器在四个尺度提取高分辨率与上下文特征；有界的可学习全局平移补偿、速度条件局部相关和 dense offset 精修共同构成运动表示。解码器同时预测热力图后验、中心偏移、可见性、定位不确定度、速度和加速度，并为每个输入帧保留 dense 输出。
 
 ## 方法概览
 
-```text
-RGB 时序窗口（T = 3 或 5）
-          │
-          ▼
-共享分层编码器
-full ─ half ─ quarter ─ eighth 特征
-          │
-          ├── 置信度门控全局平移补偿
-          ├── 速度/不确定度条件局部相关
-          ├── 时序有效性掩码与运动残差门控
-          └── dense offset 精修
-          │
-          ▼
-带高分辨率跳连的多尺度解码器
-          │
-          ├── heatmap logits
-          ├── center offset
-          ├── visibility logits
-          ├── localization uncertainty
-          ├── velocity
-          └── acceleration
-```
+![MotionPosteriorNet 架构图](assets/architecture.png)
+
+*图 1. MotionPosteriorNet 五帧版本的结构示意。实际实现的输入为 `[B, 15, H, W]`，精确的模块参数以代码为准。*
 
 部署阶段按以下顺序解码：
 

@@ -8,32 +8,13 @@ This repository contains the model implementation, training pipeline, preprocess
 
 ## Abstract
 
-TrackNetV5 combines signed motion-direction cues with residual spatio-temporal refinement for fast object tracking. MotionPosterior builds on that formulation by replacing image-difference-only interaction with feature-level temporal registration and local correspondence. A hierarchical ConvNeXt V2-style encoder produces high-resolution and contextual features at four scales. Confidence-gated global translation compensation, velocity-conditioned local correlation, and dense offset refinement provide a motion-conditioned representation. The decoder predicts a heatmap posterior together with center offset, visibility, localization uncertainty, velocity, and acceleration. The same architecture supports three-frame and five-frame windows while preserving dense per-frame outputs.
+TrackNetV5 combines signed motion-direction cues with residual spatio-temporal refinement for fast object tracking. MotionPosterior builds on that formulation by replacing image-difference-only interaction with feature-level temporal registration and local correspondence. A hierarchical ConvNeXt V2-style encoder produces high-resolution and contextual features at four scales. Learned bounded global translation compensation, velocity-conditioned local correlation, and dense offset refinement provide a motion-conditioned representation. The decoder predicts a heatmap posterior together with center offset, visibility, localization uncertainty, velocity, and acceleration. The same architecture supports three-frame and five-frame windows while preserving dense per-frame outputs.
 
 ## Method
 
-```text
-RGB window (T = 3 or 5)
-        │
-        ▼
-Shared hierarchical encoder
-full ─ half ─ quarter ─ eighth features
-        │
-        ├── confidence-gated global translation compensation
-        ├── velocity/uncertainty-conditioned local correlation
-        ├── temporal-valid masking and motion residual gating
-        └── dense offset refinement
-        │
-        ▼
-Multi-scale decoder with high-resolution skip connections
-        │
-        ├── heatmap logits
-        ├── center offset
-        ├── visibility logits
-        ├── localization uncertainty
-        ├── velocity
-        └── acceleration
-```
+![MotionPosteriorNet architecture](assets/architecture.png)
+
+*Figure 1. MotionPosteriorNet architecture for the five-frame setting. This is a schematic; the implementation takes `[B, 15, H, W]` as input, and exact module parameters are defined in the code.*
 
 The deployment decoder consumes the outputs in the following order:
 
