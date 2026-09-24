@@ -1,4 +1,5 @@
 import pandas as pd
+import math
 from pathlib import Path
 from torch.utils.data import Dataset
 from ..builder import DATASETS, build_pipeline
@@ -62,28 +63,39 @@ class TennisDataset(Dataset):
             if label == 'current' else f'y_{label}' for label in frame_order
         ]
 
-        # 构建坐标列表
+        # 始终按窗口顺序构建固定长度的浮点坐标。缺失/NaN 坐标用 NaN
+        # 表示，Finalize 会把它们保留为 [T, 2] tensor；这样不再依赖
+        # DataLoader 默认 collate 产生的 [T][B] 列表布局。
         coords_list = []
         for x_key, y_key in zip(x_fields_sorted, y_fields_sorted):
-            if x_key in row_info and y_key in row_info:
-                coords_list.append((row_info[x_key], row_info[y_key]))
-
-        if coords_list:
-            results['coords'] = coords_list
+            x_value = row_info.get(x_key, float('nan'))
+            y_value = row_info.get(y_key, float('nan'))
+            try:
+                x_value = float(x_value)
+            except (TypeError, ValueError):
+                x_value = float('nan')
+            try:
+                y_value = float(y_value)
+            except (TypeError, ValueError):
+                y_value = float('nan')
+            coords_list.append((x_value, y_value))
+        results['coords'] = coords_list
 
         vis_fields_sorted = [
             ('visibility_current' if 'visibility_current' in row_info else 'visibility')
             if label == 'current' else f'visibility_{label}' for label in frame_order
         ]
 
-        # 构建可见性列表
+        # 与 coords 保持相同的固定 T 长度；缺失可见性默认为不可见。
         visibility_list = []
         for vis_key in vis_fields_sorted:
-            if vis_key in row_info:
-                visibility_list.append(row_info[vis_key])
-
-        if visibility_list:
-            results['visibility'] = visibility_list
+            value = row_info.get(vis_key, 0)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                value = 0.0
+            visibility_list.append(0.0 if not math.isfinite(value) else value)
+        results['visibility'] = visibility_list
 
         # 识别所有图片路径字段（不包括gt路径）
         img_fields = [

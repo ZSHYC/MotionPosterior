@@ -1,6 +1,6 @@
 import argparse
 import torch
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
 # from torch.optim import lr_scheduler
 import torch.optim.lr_scheduler as pt_lr_scheduler
 from torch.utils.data import DataLoader
@@ -11,6 +11,13 @@ import random
 import numpy as np
  
 #torch.autograd.set_detect_anomaly(True)
+
+
+def _seed_worker(worker_id):
+    """Derive independent, reproducible Python/NumPy seeds per worker."""
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 # --- 1. 导入我们所有的“工厂”的建造函数 ---
 # 导入顶层包，对应的 __init__.py 文件会确保所有模块都已注册
@@ -66,6 +73,9 @@ def run_experiment(config_path_str: str):
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
+        deterministic = bool(getattr(cfg, 'deterministic', False))
+        torch.backends.cudnn.deterministic = deterministic
+        torch.backends.cudnn.benchmark = not deterministic
         
         # --- B. 环境设置 (由 Runner 内部处理或在这里设置) ---
         # (保持不变)
@@ -83,13 +93,19 @@ def run_experiment(config_path_str: str):
         print("✅ Datasets built successfully.")
         
         # 构建数据加载器 (DataLoader)
+        loader_generator = None
+        if seed is not None:
+            loader_generator = torch.Generator()
+            loader_generator.manual_seed(seed)
         train_loader = DataLoader(
             dataset=train_dataset,
             batch_size=cfg.data['samples_per_gpu'],
             num_workers=cfg.data['workers_per_gpu'],
             shuffle=True,
             pin_memory=True,
-            persistent_workers=cfg.data['workers_per_gpu'] > 0
+            persistent_workers=cfg.data['workers_per_gpu'] > 0,
+            worker_init_fn=_seed_worker if seed is not None else None,
+            generator=loader_generator,
         )
         val_loader = DataLoader(
             dataset=val_dataset,
@@ -97,7 +113,9 @@ def run_experiment(config_path_str: str):
             num_workers=cfg.data['workers_per_gpu'],
             shuffle=False,
             pin_memory=True,
-            persistent_workers=cfg.data['workers_per_gpu'] > 0
+            persistent_workers=cfg.data['workers_per_gpu'] > 0,
+            worker_init_fn=_seed_worker if seed is not None else None,
+            generator=loader_generator,
         )
         print("✅ DataLoaders built successfully.")
 

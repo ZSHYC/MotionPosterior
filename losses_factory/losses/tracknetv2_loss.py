@@ -68,6 +68,7 @@ class TrackNetV2Loss(nn.Module):
     def _stack_meta(value, batch, time, device, dtype):
         if value is None:
             return None
+        legacy_time_major = isinstance(value, (list, tuple))
         if isinstance(value, (list, tuple)):
             if not value:
                 return None
@@ -76,7 +77,7 @@ class TrackNetV2Loss(nn.Module):
             except (TypeError, RuntimeError):
                 return None
         value = torch.as_tensor(value, device=device, dtype=dtype)
-        if value.ndim >= 2 and value.shape[0] == time and value.shape[1] == batch:
+        if legacy_time_major and value.ndim >= 2 and value.shape[0] == time and value.shape[1] == batch:
             value = value.transpose(0, 1)
         elif value.ndim >= 1 and value.shape[0] != batch and value.numel() == batch * time:
             value = value.reshape(batch, time, *value.shape[1:])
@@ -92,8 +93,9 @@ class TrackNetV2Loss(nn.Module):
             coords = coords[..., :2]
             h, w = targets.shape[-2:]
             scale = coords.new_tensor([max(w - 1, 1), max(h - 1, 1)])
-            if coords.detach().abs().amax() > 1.5:
-                coords = coords / scale
+            # Dataset metadata is in model pixels.  Do not infer coordinate
+            # units from magnitude: a real ball at (0.5, 1.0) is still in pixels.
+            coords = coords / scale
             finite = torch.isfinite(coords).all(dim=-1)
             centres = torch.nan_to_num(coords, nan=0.0).clamp(0.0, 1.0)
         else:
@@ -126,6 +128,7 @@ class TrackNetV2Loss(nn.Module):
         return dt.reshape(b, -1)[:, :max(t - 1, 1)].clamp_min(1e-6)
 
     def forward(self, prediction, targets: torch.Tensor, **kwargs) -> torch.Tensor:
+        batch = kwargs.get("batch") or {}
         if isinstance(prediction, dict):
             logits = prediction.get("heat_logits")
             if logits is None:
@@ -139,7 +142,8 @@ class TrackNetV2Loss(nn.Module):
         if offsets is None:
             return heat_loss
         centres, visible = self._metadata_targets(
-            targets, kwargs.get("coords"), kwargs.get("visibility")
+            targets, kwargs.get("coords", batch.get("coords")),
+            kwargs.get("visibility", batch.get("visibility")),
         )
         offsets = offsets.float()
         aux = logits.new_zeros(())
@@ -159,7 +163,11 @@ class TrackNetV2Loss(nn.Module):
             aux = aux + self.uncertainty_weight * self._masked_mean(nll, visible)
         if self.trajectory_weight and offsets.shape[1] > 1:
             b, t = offsets.shape[:2]
-            dt = self._delta_time(kwargs, b, t, offsets.device, offsets.dtype)
+            dt_kwargs = {
+                "dt": kwargs.get("dt", batch.get("dt")),
+                "fps": kwargs.get("fps", batch.get("fps")),
+            }
+            dt = self._delta_time(dt_kwargs, b, t, offsets.device, offsets.dtype)
             velocity = (offsets[:, 1:] - offsets[:, :-1]) / dt[..., None]
             target_velocity = (centres[:, 1:] - centres[:, :-1]) / dt[..., None]
             valid_pairs = visible[:, 1:] & visible[:, :-1]

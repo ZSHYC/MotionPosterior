@@ -20,12 +20,12 @@ def _numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
-def heatmap_frame(prediction: Any, frame_index: int = 0) -> np.ndarray:
+def heatmap_frame(prediction: Any, frame_index: int = 0, batch_index: int = 0) -> np.ndarray:
     """Return one probability heatmap from tensor or rich model output."""
     value = prediction.get("heatmap") if isinstance(prediction, dict) else prediction
     heatmap = _numpy(value)
     if heatmap.ndim == 4:  # [B, T, H, W]
-        heatmap = heatmap[0, frame_index]
+        heatmap = heatmap[batch_index, frame_index]
     elif heatmap.ndim == 3:  # [T, H, W]
         heatmap = heatmap[frame_index]
     elif heatmap.ndim != 2:
@@ -56,17 +56,18 @@ def decode_heatmap(heatmap: np.ndarray, threshold: float = 0.5) -> Optional[Tupl
     return float(moments["m10"] / moments["m00"]), float(moments["m01"] / moments["m00"]), float(max_value / 255.0)
 
 
-def _frame_value(value: Any, frame_index: int) -> Optional[np.ndarray]:
+def _frame_value(value: Any, frame_index: int, batch_index: int = 0) -> Optional[np.ndarray]:
     if value is None:
         return None
     array = _numpy(value)
     if array.ndim == 2 and array.shape[-1] == 2:
         # Unbatched offset sequence: [T, 2].
         array = array[frame_index]
-    elif array.ndim == 2 and array.shape[0] == 1:
-        array = array[0, frame_index]
+    elif array.ndim == 2:
+        # Batched scalar sequence: [B, T].
+        array = array[batch_index if array.shape[0] > 1 else 0, frame_index]
     elif array.ndim >= 3:
-        array = array[0, frame_index] if array.shape[0] == 1 else array[frame_index]
+        array = array[batch_index if array.shape[0] > 1 else 0, frame_index]
     elif array.ndim == 1:
         array = array[frame_index]
     return np.asarray(array)
@@ -77,6 +78,8 @@ def decode_prediction(
     frame_index: int = 0,
     threshold: float = 0.5,
     visibility_threshold: Optional[float] = None,
+    batch_index: int = 0,
+    uncertainty_threshold: Optional[float] = None,
 ) -> Optional[Tuple[float, float, float]]:
     """Decode tensor or rich prediction into a model-space point.
 
@@ -85,15 +88,15 @@ def decode_prediction(
     or low visibility logit abstains instead of inventing a position.
     """
     if not isinstance(prediction, dict):
-        return decode_heatmap(heatmap_frame(prediction, frame_index), threshold)
+        return decode_heatmap(heatmap_frame(prediction, frame_index, batch_index), threshold)
 
-    heatmap = heatmap_frame(prediction, frame_index)
+    heatmap = heatmap_frame(prediction, frame_index, batch_index)
     peak = float(heatmap.max())
     if not math.isfinite(peak) or peak < threshold:
         return None
 
     visibility_threshold = threshold if visibility_threshold is None else float(visibility_threshold)
-    visibility = _frame_value(prediction.get("visibility_logits"), frame_index)
+    visibility = _frame_value(prediction.get("visibility_logits"), frame_index, batch_index)
     if visibility is not None:
         visibility_value = float(1.0 / (1.0 + np.exp(-float(np.ravel(visibility)[0]))))
         if not math.isfinite(visibility_value) or visibility_value < visibility_threshold:
@@ -101,16 +104,29 @@ def decode_prediction(
     else:
         visibility_value = 1.0
 
-    offset = _frame_value(prediction.get("offset"), frame_index)
+    uncertainty = _frame_value(prediction.get("uncertainty"), frame_index, batch_index)
+    uncertainty_value = None
+    if uncertainty is not None and np.asarray(uncertainty).size:
+        uncertainty_value = float(np.ravel(uncertainty)[0])
+        if not math.isfinite(uncertainty_value):
+            return None
+        uncertainty_value = max(0.0, uncertainty_value)
+        if uncertainty_threshold is not None and uncertainty_value > float(uncertainty_threshold):
+            return None
+    confidence = min(peak, visibility_value)
+    if uncertainty_value is not None:
+        confidence *= math.exp(-min(uncertainty_value, 8.0))
+
+    offset = _frame_value(prediction.get("offset"), frame_index, batch_index)
     if offset is not None and np.asarray(offset).size >= 2:
         x_norm, y_norm = (float(v) for v in np.ravel(offset)[:2])
         if math.isfinite(x_norm) and math.isfinite(y_norm):
             height, width = heatmap.shape
             x = float(np.clip(x_norm, 0.0, 1.0) * max(width - 1, 1))
             y = float(np.clip(y_norm, 0.0, 1.0) * max(height - 1, 1))
-            return x, y, float(min(peak, visibility_value))
+            return x, y, float(confidence)
 
     decoded = decode_heatmap(heatmap, threshold)
     if decoded is None:
         return None
-    return decoded[0], decoded[1], float(min(decoded[2], visibility_value))
+    return decoded[0], decoded[1], float(confidence)

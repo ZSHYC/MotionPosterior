@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 from scipy.spatial import distance
 import torch
-import math
 from ..builder import METRICS
+from core.postprocess import decode_prediction
 
 
 
@@ -46,45 +46,63 @@ class TrackNetV2Metric:
         """清空计分板。"""
         self.tp, self.fp1, self.fp2, self.fp, self.tn, self.fn = 0, 0, 0, 0, 0, 0
         self.pixel_errors = []
+        self.visible_total = 0
+        self.visible_detected = 0
+
+    @staticmethod
+    def _batch_time(value, batch_size, time_steps):
+        """Normalize metadata to [B,T,...] for old and new collate layouts."""
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            value = value.detach().cpu().numpy()
+        value = np.asarray(value)
+        if value.ndim >= 2 and value.shape[0] == time_steps and value.shape[1] == batch_size:
+            value = value.transpose(1, 0, *range(2, value.ndim))
+        if value.ndim >= 1 and value.shape[0] != batch_size and value.size == batch_size * time_steps:
+            value = value.reshape(batch_size, time_steps)
+        return value
 
     def update(self, logits: torch.Tensor, batch: dict):
         """根据一个批次的数据，更新计分板。"""
-        if isinstance(logits, dict):
-            logits = logits["heatmap"]
-        predictions = logits.detach().cpu().numpy() * 255
+        predictions = logits["heatmap"].detach().cpu().numpy() if isinstance(logits, dict) else logits.detach().cpu().numpy()
         _, c, h, w = predictions.shape
-        scale_h = h / self.original_h
-        scale_w = w / self.original_w
-        coords_gt = batch['coords']
-        visibility_gt = batch['visibility']
+        batch_size = predictions.shape[0]
+        coords_gt = self._batch_time(batch.get('coords'), batch_size, c)
+        visibility_gt = self._batch_time(batch.get('visibility'), batch_size, c)
+        threshold = self.heatmap_threshold / 255.0 if self.heatmap_threshold > 1 else self.heatmap_threshold
 
-        for i in range(len(predictions)):
+        for i in range(batch_size):
             for j in range(c):
-                # 直接调用本文件内的辅助函数
-                x_pred, y_pred = _heatmap_to_coords(predictions[i][j], threshold=self.heatmap_threshold)
-
-                # 当vis==0时，x_gt和y_gt为nan
-                x_gt, y_gt = coords_gt[j][0][i].item(), coords_gt[j][1][i].item()
-                vis = visibility_gt[j][i].item()
+                decoded = decode_prediction(logits, j, threshold=threshold, batch_index=i)
+                x_pred, y_pred = (decoded[:2] if decoded is not None else (None, None))
+                if coords_gt is None or visibility_gt is None:
+                    continue
+                x_gt, y_gt = np.asarray(coords_gt[i, j, :2], dtype=float)
+                vis = float(np.asarray(visibility_gt[i, j]).reshape(-1)[0])
+                visible = vis > 0.5 and np.isfinite([x_gt, y_gt]).all()
+                if visible:
+                    self.visible_total += 1
 
                 if x_pred is not None:
-                    if vis != 0:
-                        try:
-                            x_gt_scaled = int(x_gt * scale_w)
-                            y_gt_scaled = int(y_gt * scale_h)
-                        except:
-                            self.fp2 += 1
-                            continue
-                        dist = distance.euclidean((x_pred, y_pred), (x_gt_scaled, y_gt_scaled))
+                    if visible:
+                        # New Finalize emits model-space coordinates.  Keep a
+                        # compatibility conversion for callers still passing
+                        # source-resolution metadata.
+                        if x_gt > w or y_gt > h:
+                            x_gt *= w / self.original_w
+                            y_gt *= h / self.original_h
+                        dist = distance.euclidean((x_pred, y_pred), (x_gt, y_gt))
                         self.pixel_errors.append(float(dist))
                         if dist < self.min_dist:
                             self.tp += 1
+                            self.visible_detected += 1
                         else:
                             self.fp1 += 1
                     else:
                         self.fp2 += 1
                 else:
-                    if vis != 0:
+                    if visible:
                         self.fn += 1
                     else:
                         self.tn += 1
@@ -100,6 +118,8 @@ class TrackNetV2Metric:
         f1 = 2 * precision * recall / (precision + recall + eps)
         mean_error = float(np.mean(self.pixel_errors)) if self.pixel_errors else float("nan")
         p90_error = float(np.percentile(self.pixel_errors, 90)) if self.pixel_errors else float("nan")
+        p50_error = float(np.percentile(self.pixel_errors, 50)) if self.pixel_errors else float("nan")
+        p95_error = float(np.percentile(self.pixel_errors, 95)) if self.pixel_errors else float("nan")
 
         return {
             'Total': total,
@@ -114,5 +134,9 @@ class TrackNetV2Metric:
             'Recall': recall,
             'F1-Score': f1,
             'MeanPixelError': mean_error,
+            'P50PixelError': p50_error,
             'P90PixelError': p90_error,
+            'P95PixelError': p95_error,
+            'VisibleRecall': self.visible_detected / (self.visible_total + eps),
+            'MissRate': self.fn / (self.visible_total + eps),
         }

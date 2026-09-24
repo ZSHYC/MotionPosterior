@@ -2,6 +2,7 @@ import torch
 from tqdm import tqdm
 from pathlib import Path
 import numpy as np
+import random
 
 class Runner:
     """
@@ -56,6 +57,16 @@ class Runner:
             'epoch': self.epoch,
             'global_iter': self.global_iter,
             'best_metric': self.best_metric,
+            'rng_state': {
+                'python': random.getstate(),
+                'numpy': np.random.get_state(),
+                'torch': torch.get_rng_state(),
+                'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            },
+            'config': {
+                key: value for key, value in vars(self.cfg).items()
+                if not key.startswith('__') and isinstance(value, (str, int, float, bool, type(None), dict, list, tuple))
+            },
         }
 
     def _load_checkpoint(self, checkpoint_path):
@@ -70,6 +81,16 @@ class Runner:
             self.start_epoch = int(checkpoint.get('epoch', -1)) + 1
             self.global_iter = int(checkpoint.get('global_iter', 0))
             self.best_metric = float(checkpoint.get('best_metric', 0.0))
+            rng_state = checkpoint.get('rng_state')
+            if rng_state:
+                if rng_state.get('python') is not None:
+                    random.setstate(rng_state['python'])
+                if rng_state.get('numpy') is not None:
+                    np.random.set_state(rng_state['numpy'])
+                if rng_state.get('torch') is not None:
+                    torch.set_rng_state(rng_state['torch'])
+                if torch.cuda.is_available() and rng_state.get('cuda') is not None:
+                    torch.cuda.set_rng_state_all(rng_state['cuda'])
         print(f"✅ Resumed checkpoint from {checkpoint_path} at epoch {self.start_epoch}")
 
     def call_hooks(self, event_name):
@@ -210,25 +231,25 @@ class Runner:
             if (self.epoch + 1) % self.cfg.evaluation['interval'] == 0:
                 self.validate_epoch()
                 
-                # --- 新增代码 START ---
-                # 1. 每次验证后，都保存当前 epoch 的模型快照
-                # 使用 f-string 创建一个独一无二的文件名，如 'epoch_5.pth'
-                checkpoint_path = self.work_dir / f'epoch_{self.epoch + 1}.pth'
-                torch.save(self._checkpoint(), checkpoint_path)
-                print(f"✅ Checkpoint saved for epoch {self.epoch + 1} to {checkpoint_path}")
-                # --- 新增代码 END ---
-
-                # 2. 保留原有的逻辑，用于保存和更新性能最佳的模型
+                # Best metric is updated after validation; checkpoint writing is
+                # performed after scheduler.step() below so resume sees the
+                # learning-rate state that follows this epoch.
                 current_f1 = self.outputs.get('val_metrics', {}).get('F1-Score', 0.0)
                 if current_f1 > self.best_metric:
                     self.best_metric = current_f1
-                    best_model_path = self.work_dir / 'best_model.pth'
-                    torch.save(self._checkpoint(), best_model_path)
-                    print(f"🏆 New best model saved to {best_model_path} with F1-score: {self.best_metric:.4f}")
             
             # 只有在学习率调度器存在时，才执行 .step()
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
+
+            if (self.epoch + 1) % self.cfg.evaluation['interval'] == 0:
+                checkpoint_path = self.work_dir / f'epoch_{self.epoch + 1}.pth'
+                torch.save(self._checkpoint(), checkpoint_path)
+                print(f"✅ Checkpoint saved for epoch {self.epoch + 1} to {checkpoint_path}")
+                if self.outputs.get('val_metrics', {}).get('F1-Score', 0.0) >= self.best_metric:
+                    best_model_path = self.work_dir / 'best_model.pth'
+                    torch.save(self._checkpoint(), best_model_path)
+                    print(f"🏆 Best model saved to {best_model_path} with F1-score: {self.best_metric:.4f}")
 
             self.call_hooks('after_epoch')
             

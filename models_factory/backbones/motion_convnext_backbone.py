@@ -147,14 +147,22 @@ class _SpatialTemporalMotionFusion(nn.Module):
             key = F.normalize(self.key(warped), dim=1)
             value = self.value(warped)
 
-            # Nine score maps are much smaller than unfolding full value maps,
-            # especially at half resolution for five frames.
-            padded_key = F.pad(key, (1, 1, 1, 1))
+            # Sample keys at the expanded radius before scoring.  Scaling only
+            # the expected displacement after a fixed 3x3 correlation would
+            # still miss fast balls outside that original neighbourhood.
             displacements = [(dx, dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
-            local_scores = torch.stack([
-                (q * padded_key[:, :, 1 + dy:1 + dy + h, 1 + dx:1 + dx + w]).sum(dim=1)
-                for dx, dy in displacements
-            ], dim=1)
+            local_scores = []
+            for dx, dy in displacements:
+                sampling_grid = base_grid + torch.stack((
+                    radius_scale * dx * (2.0 / max(w - 1, 1)),
+                    radius_scale * dy * (2.0 / max(h - 1, 1)),
+                ), dim=-1)[:, None, None, :]
+                sampled_key = F.grid_sample(
+                    key, sampling_grid, mode="bilinear",
+                    padding_mode="border", align_corners=True,
+                )
+                local_scores.append((q * sampled_key).sum(dim=1))
+            local_scores = torch.stack(local_scores, dim=1)
             local_weights = torch.softmax(
                 local_scores / self.temperature.clamp_min(0.1), dim=1
             )

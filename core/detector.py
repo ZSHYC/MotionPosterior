@@ -35,15 +35,17 @@ MODEL_CONFIGS = {
     'motion3': dict(
         type='TrackNetMotion',
         num_frames=3,
+        return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
     ),
     'motion5': dict(
         type='TrackNetMotion',
         num_frames=5,
+        return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
     ),
     'motion5_causal': dict(
-        type='TrackNetMotion', num_frames=5,
+        type='TrackNetMotion', num_frames=5, return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
     ),
 }

@@ -43,15 +43,17 @@ MODEL_CONFIGS = {
     'motion3': dict(
         type='TrackNetMotion',
         num_frames=3,
+        return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=3),
     ),
     'motion5': dict(
         type='TrackNetMotion',
         num_frames=5,
+        return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
     ),
     'motion5_causal': dict(
-        type='TrackNetMotion', num_frames=5,
+        type='TrackNetMotion', num_frames=5, return_aux=True,
         backbone=dict(type='MotionConvNeXtBackbone', num_frames=5),
     ),
 }
@@ -369,8 +371,8 @@ def build_parser():
     )
     parser.add_argument(
         '--window-mode', choices=('chunk', 'center', 'causal'), default=None,
-        help='Temporal inference semantics. Motion models default to center; '
-             'causal uses only past frames, chunk preserves legacy non-overlap.',
+        help='Temporal inference semantics. Default is chunk (non-overlap); '
+             'center is offline symmetric, causal uses only past frames.',
     )
     parser.add_argument(
         '--output-dir',

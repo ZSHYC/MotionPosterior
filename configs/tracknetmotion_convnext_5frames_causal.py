@@ -42,4 +42,5 @@ total_epochs = 30
 work_dir = f'./workdirs/{Path(__file__).stem}'
 log_config = dict(interval=100, hooks=[dict(type='TextLoggerHook'), dict(type='TensorboardLoggerHook')])
 seed = 42
+deterministic = True
 resume_from = None

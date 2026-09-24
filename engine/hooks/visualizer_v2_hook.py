@@ -46,7 +46,7 @@ class ValidationVisualizerV2Hook(BaseHook):
 
         input_tensor = batch['image'].cpu()
         target_tensor = batch['target'].cpu()
-        coords_gt_batch = batch['coords']
+        coords_gt_batch = batch.get('coords')
         # print(logits.shape)
         if isinstance(logits, dict):
             logits = logits['heatmap']
@@ -90,8 +90,14 @@ class ValidationVisualizerV2Hook(BaseHook):
             x_gt = []
             y_gt = []
             for frame_idx in range(num_frames):
-                x_gt_raw = coords_gt_batch[frame_idx][0][i].item()
-                y_gt_raw = coords_gt_batch[frame_idx][1][i].item()
+                if torch.is_tensor(coords_gt_batch):
+                    # Current dataset contract is [B,T,2].
+                    x_gt_raw = coords_gt_batch[i, frame_idx, 0].item()
+                    y_gt_raw = coords_gt_batch[i, frame_idx, 1].item()
+                else:
+                    # Compatibility with old default-collate [T][B,2].
+                    x_gt_raw = coords_gt_batch[frame_idx][i][0].item()
+                    y_gt_raw = coords_gt_batch[frame_idx][i][1].item()
                 x_gt.append(x_gt_raw)
                 y_gt.append(y_gt_raw)
 

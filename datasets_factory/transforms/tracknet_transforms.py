@@ -34,9 +34,28 @@ class Resize:
         self.size_wh = (size[1], size[0]) # cv2.resize expects (width, height)
 
     def __call__(self, results: dict) -> dict:
+        original_shape = None
         for key in self.keys:
             if key in results:
-                results[key] = cv2.resize(results[key], self.size_wh) # 调整到模型需要的输入尺寸
+                image = results[key]
+                if original_shape is None:
+                    original_shape = image.shape[:2]
+                results[key] = cv2.resize(image, self.size_wh) # 调整到模型需要的输入尺寸
+        # 坐标来自原始帧像素坐标，必须和图像使用同一几何缩放。
+        coords = results.get('coords')
+        if coords is not None and original_shape is not None:
+            old_h, old_w = original_shape
+            new_w, new_h = self.size_wh
+            scale_x = new_w / max(float(old_w), 1.0)
+            scale_y = new_h / max(float(old_h), 1.0)
+            scaled = []
+            for pair in coords:
+                try:
+                    x, y = float(pair[0]), float(pair[1])
+                except (TypeError, ValueError, IndexError):
+                    x, y = float('nan'), float('nan')
+                scaled.append((x * scale_x, y * scale_y))
+            results['coords'] = scaled
         return results
 
 @TRANSFORMS.register_module
@@ -88,8 +107,8 @@ class LoadAndFormatTarget:
         gt_path = results[self.key]
         size = (results['input_width'], results['input_height'])
         target_np = cv2.imread(str(gt_path), cv2.IMREAD_GRAYSCALE) # 以灰度图读取
-        target_np = cv2.resize(target_np, size, interpolation=cv2.INTER_NEAREST) # 插值缩放尺寸
-        results[self.output_key] = torch.from_numpy(target_np.astype(np.int64)) # 以'target'存入results
+        target_np = cv2.resize(target_np.astype(np.float32), size, interpolation=cv2.INTER_LINEAR)
+        results[self.output_key] = torch.from_numpy(target_np)
         return results
 
 @TRANSFORMS.register_module
@@ -107,12 +126,12 @@ class LoadAndFormatMultiTargets:
         for key in self.keys:
             gt_path = results[key]
             target_np = cv2.imread(str(gt_path), cv2.IMREAD_GRAYSCALE)
-            target_np = cv2.resize(target_np, size, interpolation=cv2.INTER_NEAREST)
+            target_np = cv2.resize(target_np.astype(np.float32), size, interpolation=cv2.INTER_LINEAR)
             targets.append(target_np)
 
         # 堆叠成 [3, H, W] 维度
-        target_stack = np.stack(targets, axis=0)  # 形状: (3, H, W)
-        results[self.output_key] = torch.from_numpy(target_stack.astype(np.float32))
+        target_stack = np.stack(targets, axis=0).astype(np.float32)  # 形状: (T, H, W)
+        results[self.output_key] = torch.from_numpy(target_stack)
         return results
 
 
@@ -130,6 +149,19 @@ class Finalize:
         img = results[self.image_key]
         results[self.image_key] = torch.from_numpy(img.transpose(2, 0, 1)).float().div(255) # 转成需要的pytorch需要的维度格式[C,H,W], 数据格式0-1之间
         
+        # 固定 metadata 契约：[T, 2] float32 和 [T] float32。这里做转换而
+        # 非依赖默认 collate 的列表转置，单样本和批处理拥有同一语义。
+        if 'coords' in results:
+            coords = np.asarray(results['coords'], dtype=np.float32)
+            if coords.size == 0:
+                coords = np.full((0, 2), np.nan, dtype=np.float32)
+            coords = coords.reshape(-1, 2)
+            results['coords'] = torch.from_numpy(coords)
+        if 'visibility' in results:
+            visibility = np.asarray(results['visibility'], dtype=np.float32).reshape(-1)
+            visibility = np.nan_to_num(visibility, nan=0.0, posinf=0.0, neginf=0.0)
+            results['visibility'] = torch.from_numpy(visibility)
+
         # 从“周转箱”中只挑选出模型训练/评估需要的最终数据
         final_data = {}
         for key in self.final_keys:
